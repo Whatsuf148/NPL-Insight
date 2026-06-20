@@ -30,6 +30,7 @@ class SimulatorSource(DataSource):
 
         rng = np.random.default_rng(seed + season_id)
         real_rosters: dict[str, list[str]] = self.config.get("_real_rosters", {})
+        real_captains: dict[str, str] = self.config.get("_real_captains", {})
         use_real = sim_cfg.get("use_real_rosters", True) and bool(real_rosters)
 
         rosters = {}
@@ -39,6 +40,41 @@ class SimulatorSource(DataSource):
             # Pad with synthetic names if a team's real squad is smaller than
             # players_per_team, so every team always has a full pool to draw from.
             rosters[team] = list(real_players) + synthetic_players[len(real_players):]
+
+        # A core XI per team, fixed for the season — real T20 leagues don't pick an
+        # independent random 11 every match; captains and regular starters play
+        # nearly every game. Sampling a fresh 11 out of an 18-21 player squad per
+        # match (the original approach) let real players like a team's own captain
+        # land in only 2 of 15 matches purely by chance, which looked wrong once
+        # real names were wired in. Each match below rotates 0-2 players out of this
+        # core for minor realism, but the core (and the captain specifically) plays
+        # almost every match.
+        core_xi: dict[str, list[str]] = {}
+        for team in teams:
+            roster = rosters[team]
+            captain = real_captains.get(team) if use_real else None
+            if captain and captain in roster:
+                bench_pool = [p for p in roster if p != captain]
+                size = min(10, len(bench_pool))
+                others = list(rng.choice(bench_pool, size=size, replace=False))
+                core_xi[team] = [captain] + others
+            else:
+                size = min(11, len(roster))
+                core_xi[team] = list(rng.choice(roster, size=size, replace=False))
+
+        def pick_playing_xi(team: str) -> list[str]:
+            roster = rosters[team]
+            captain = real_captains.get(team) if use_real else None
+            xi = list(core_xi[team])
+            rotation_count = int(rng.binomial(2, 0.15))
+            bench = [p for p in roster if p not in xi]
+            rotatable = [p for p in xi if p != captain]
+            rotation_count = min(rotation_count, len(bench), len(rotatable))
+            if rotation_count > 0:
+                players_out = rng.choice(rotatable, size=rotation_count, replace=False)
+                players_in = rng.choice(bench, size=rotation_count, replace=False)
+                xi = [p for p in xi if p not in players_out] + list(players_in)
+            return xi
 
         records = []
         match_id_counter = 1
@@ -53,8 +89,8 @@ class SimulatorSource(DataSource):
                 team_rows = {home: [], away: []}
                 team_score = {}
                 for team, opponent in [(home, away), (away, home)]:
-                    playing_xi = rng.choice(rosters[team], size=11, replace=False)
-                    bowlers = rng.choice(playing_xi, size=6, replace=False)
+                    playing_xi = pick_playing_xi(team)
+                    bowlers = rng.choice(playing_xi, size=min(6, len(playing_xi)), replace=False)
 
                     total_runs = total_wickets = total_errors = 0
                     for player in playing_xi:

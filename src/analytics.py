@@ -115,7 +115,76 @@ def player_stats_table(master_df: pd.DataFrame, season: int | None = None) -> pd
     table = table.merge(runs_conceded, on=["season", "player", "team"], how="left")
     table["runs_conceded"] = table["runs_conceded"].fillna(0)
     table["economy"] = (table["runs_conceded"] / table["overs_bowled"].replace(0, np.nan)).round(2).fillna(0.0)
-    return table.drop(columns=["runs_conceded"]).sort_values("runs", ascending=False).reset_index(drop=True)
+
+    team_matches = df.groupby(["season", "team"])["match_id"].nunique().rename("team_matches")
+    table = table.merge(team_matches, on=["season", "team"], how="left")
+    table["matches_played_pct"] = (table["matches"] / table["team_matches"] * 100).round(1)
+
+    return table.drop(columns=["runs_conceded", "team_matches"]).sort_values(
+        "runs", ascending=False
+    ).reset_index(drop=True)
+
+
+def best_individual_performances(master_df: pd.DataFrame, season: int | None = None) -> dict[str, pd.DataFrame]:
+    """Best single-match performances per player: highest individual score,
+    and best bowling figures (most wickets, tie-broken by fewest runs conceded)."""
+    df = master_df if season is None else master_df[master_df["season"] == season]
+
+    per_match_batting = df.groupby(["season", "player", "team", "match_id", "opponent"], as_index=False).agg(
+        runs=("runs", "sum"), balls=("balls", "sum")
+    )
+    best_score_idx = per_match_batting.groupby(["season", "player"])["runs"].idxmax()
+    best_scores = per_match_batting.loc[best_score_idx].rename(
+        columns={"runs": "best_score", "match_id": "match", "opponent": "vs"}
+    ).sort_values("best_score", ascending=False).reset_index(drop=True)
+
+    bowled = df[df["overs"] > 0].copy()
+    bowled["runs_conceded"] = bowled["economy"] * bowled["overs"]
+    per_match_bowling = bowled.groupby(["season", "player", "team", "match_id", "opponent"], as_index=False).agg(
+        wickets=("wickets", "sum"), runs_conceded=("runs_conceded", "sum")
+    )
+    per_match_bowling = per_match_bowling.sort_values(["wickets", "runs_conceded"], ascending=[False, True])
+    best_bowling = per_match_bowling.groupby(["season", "player"], as_index=False).first().rename(
+        columns={"match_id": "match", "opponent": "vs"}
+    )
+    best_bowling["runs_conceded"] = best_bowling["runs_conceded"].round(0).astype(int)
+    best_bowling = best_bowling.sort_values(
+        ["wickets", "runs_conceded"], ascending=[False, True]
+    ).reset_index(drop=True)
+
+    return {"best_batting": best_scores, "best_bowling": best_bowling}
+
+
+def player_profile(master_df: pd.DataFrame, player_impact_score: pd.DataFrame, player: str) -> dict:
+    """Single-player summary: every team/season they appear under, career
+    totals, best performances, appearance rate, and where they rank by
+    impact score — the one-stop view answering 'who is this player and how
+    good are they', not just a row in a leaderboard."""
+    rows = master_df[master_df["player"] == player]
+    if rows.empty:
+        return {}
+
+    stats = player_stats_table(master_df)
+    player_rows = stats[stats["player"] == player]
+    best = best_individual_performances(master_df)
+    best_batting = best["best_batting"][best["best_batting"]["player"] == player]
+    best_bowling = best["best_bowling"][best["best_bowling"]["player"] == player]
+
+    impact_rows = player_impact_score[player_impact_score["player"] == player]
+    ranks = []
+    for _, impact_row in impact_rows.iterrows():
+        season_scores = player_impact_score[player_impact_score["season"] == impact_row["season"]]
+        rank = (season_scores["player_impact_score"] > impact_row["player_impact_score"]).sum() + 1
+        ranks.append({"season": impact_row["season"], "impact_rank": int(rank), "out_of": len(season_scores)})
+
+    return {
+        "teams": sorted(rows["team"].unique()),
+        "seasons": sorted(rows["season"].unique()),
+        "stats_by_season": player_rows,
+        "best_batting": best_batting,
+        "best_bowling": best_bowling,
+        "impact_ranks": pd.DataFrame(ranks),
+    }
 
 
 def top_wicket_taker_per_opponent(master_df: pd.DataFrame, season: int | None = None) -> pd.DataFrame:
@@ -193,6 +262,76 @@ def fun_facts(config: dict | None = None) -> list[str]:
             "config/config.yaml and re-run the pipeline to populate this section."
         )
     return facts
+
+
+def all_time_leaders(master_df: pd.DataFrame, top_n: int = 10) -> dict[str, pd.DataFrame]:
+    """Cross-season cumulative leaders from the dataset (real player names,
+    summed across every season present) — answers 'all-time highest run
+    scorer / wicket-taker' across the whole dataset, not just one season."""
+    runs = master_df.groupby(["player", "team"], as_index=False)["runs"].sum()
+    runs = runs.sort_values("runs", ascending=False).head(top_n).reset_index(drop=True)
+
+    wickets = master_df.groupby(["player", "team"], as_index=False)["wickets"].sum()
+    wickets = wickets.sort_values("wickets", ascending=False).head(top_n).reset_index(drop=True)
+
+    catches = master_df.groupby(["player", "team"], as_index=False)["catches_taken"].sum()
+    catches = catches.sort_values("catches_taken", ascending=False).head(top_n).reset_index(drop=True)
+
+    return {"runs": runs, "wickets": wickets, "catches": catches}
+
+
+def real_all_time_leaders(leaders_runs: pd.DataFrame, leaders_wickets: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """Combines each season's REAL published top-5 leaderboard into one
+    cross-season total. Caveat: this only sums what each season's article
+    published as its top 5 — a player just outside a season's top 5 won't
+    be counted for that season, so totals are a lower bound, not exhaustive
+    career figures."""
+    runs = leaders_runs.copy()
+    runs["Runs"] = pd.to_numeric(runs["Runs"], errors="coerce")
+    runs_total = runs.groupby("Player", as_index=False).agg(
+        total_runs=("Runs", "sum"), seasons_in_top5=("season", "nunique"), team=("Team", "first")
+    ).sort_values("total_runs", ascending=False).reset_index(drop=True)
+
+    wickets = leaders_wickets.copy()
+    wickets["Wickets"] = pd.to_numeric(wickets["Wickets"], errors="coerce")
+    wickets_total = wickets.groupby("Player", as_index=False).agg(
+        total_wickets=("Wickets", "sum"), seasons_in_top5=("season", "nunique"), team=("Team", "first")
+    ).sort_values("total_wickets", ascending=False).reset_index(drop=True)
+
+    return {"runs": runs_total, "wickets": wickets_total}
+
+
+def player_vs_player_matchup(master_df: pd.DataFrame, player_a: str, player_b: str) -> pd.DataFrame:
+    """Side-by-side stat line for two players in every match where both
+    appeared (on either the same or opposing teams). The dataset is
+    player-match-phase aggregates, not ball-by-ball, so this is an honest
+    match-level comparison — not a literal 'who bowled to whom' duel, which
+    would need ball-by-ball data this project doesn't have."""
+    a_matches = set(master_df.loc[master_df["player"] == player_a, "match_id"])
+    b_matches = set(master_df.loc[master_df["player"] == player_b, "match_id"])
+    shared_matches = a_matches & b_matches
+    if not shared_matches:
+        return pd.DataFrame()
+
+    scope = master_df[master_df["match_id"].isin(shared_matches) & master_df["player"].isin([player_a, player_b])]
+    summary = scope.groupby(["match_id", "player", "team"], as_index=False).agg(
+        runs=("runs", "sum"), balls=("balls", "sum"), wickets=("wickets", "sum"),
+        overs=("overs", "sum"), match_result=("match_result", "first"),
+    )
+    import numpy as np
+
+    summary["strike_rate"] = (summary["runs"] / summary["balls"].replace(0, np.nan) * 100).round(2).fillna(0.0)
+    return summary.sort_values("match_id").reset_index(drop=True)
+
+
+def head_to_head_record(head_to_head: pd.DataFrame, team_a: str, team_b: str) -> pd.DataFrame:
+    """Real fixture-by-fixture results between two specific teams, across
+    whichever seasons are present in the real_head_to_head table."""
+    mask = (
+        ((head_to_head["team_a"] == team_a) & (head_to_head["team_b"] == team_b))
+        | ((head_to_head["team_a"] == team_b) & (head_to_head["team_b"] == team_a))
+    )
+    return head_to_head[mask].reset_index(drop=True)
 
 
 def win_probability_features(master_df: pd.DataFrame) -> pd.DataFrame:

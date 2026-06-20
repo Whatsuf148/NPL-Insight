@@ -14,6 +14,7 @@ verified reasons) — Wikipedia fills that gap with real, citable data today.
 """
 from __future__ import annotations
 
+import difflib
 import re
 
 import pandas as pd
@@ -32,12 +33,68 @@ def _get_soup(url: str) -> BeautifulSoup:
     return BeautifulSoup(response.text, "html.parser")
 
 
+def _canonicalize_team(name: str, known_teams: list[str]) -> str:
+    """Maps a team name as spelled in one Wikipedia article/table to config's
+    canonical spelling.
+
+    Real bug this fixes: config.yaml's "Kathmandu Gorkhas" didn't match
+    Season 1's article, which spells the same franchise "Kathmandu Gurkhas".
+    Every roster lookup for that team silently returned nothing, so every
+    "Kathmandu Gorkhas" player in the simulated dataset was a fallback
+    placeholder name ("Kathmandu Player N") instead of a real one — not a
+    crash, just quietly wrong data. Wikipedia's spelling is inconsistent
+    even within the same article family, so this matches fuzzily against
+    the authoritative team list instead of hardcoding one alias.
+    """
+    if name in known_teams:
+        return name
+    matches = difflib.get_close_matches(name, known_teams, n=1, cutoff=0.6)
+    return matches[0] if matches else name
+
+
 def _table_rows(table) -> list[list[str]]:
-    rows = []
-    for tr in table.find_all("tr"):
-        cells = [c.get_text(" ", strip=True) for c in tr.find_all(["th", "td"])]
-        if cells:
-            rows.append(cells)
+    """Parses <tr> rows into aligned cell lists, honoring rowspan.
+
+    Wikipedia's ranking tables (e.g. "Most wickets") merge the rank/value
+    cell across tied rows via rowspan instead of repeating it — a naive
+    cell-per-row parse leaves tied rows short by one column and silently
+    drops them downstream (a real bug: joint wicket-leaders were missing
+    entirely). This carries a rowspan cell's text down into the rows it
+    visually spans, so every row ends up with the same column count.
+    """
+    raw_trs = table.find_all("tr")
+    # pending[col_index] = (text, rows_remaining)
+    pending: dict[int, tuple[str, int]] = {}
+    rows: list[list[str]] = []
+
+    for tr in raw_trs:
+        cells = tr.find_all(["th", "td"])
+        row: list[str] = []
+        col = 0
+        cell_iter = iter(cells)
+        current_cell = next(cell_iter, None)
+
+        while current_cell is not None or col in pending:
+            if col in pending:
+                text, remaining = pending[col]
+                row.append(text)
+                if remaining <= 1:
+                    del pending[col]
+                else:
+                    pending[col] = (text, remaining - 1)
+                col += 1
+                continue
+
+            text = current_cell.get_text(" ", strip=True)
+            rowspan = int(current_cell.get("rowspan", 1) or 1)
+            row.append(text)
+            if rowspan > 1:
+                pending[col] = (text, rowspan - 1)
+            col += 1
+            current_cell = next(cell_iter, None)
+
+        if row:
+            rows.append(row)
     return rows
 
 
@@ -54,6 +111,7 @@ class WikipediaSource(DataSource):
         """Real team -> real player name list. Only Season 1's article publishes
         full squads in a parseable table; season 2 reuses the same core rosters
         (same league, same 8 franchises) when its own squad table isn't available."""
+        known_teams = self.config["teams"]
         soup = _get_soup(self._season_url(season_id))
         squads: dict[str, list[str]] = {}
         for table in soup.find_all("table", class_="wikitable"):
@@ -66,7 +124,7 @@ class WikipediaSource(DataSource):
                 cells = row.find_all(["th", "td"])
                 if len(cells) < 3:
                     continue
-                team = cells[0].get_text(strip=True)
+                team = _canonicalize_team(cells[0].get_text(strip=True), known_teams)
                 squad_raw = cells[-1].get_text(",", strip=True)
                 squad_raw = _NAME_ANNOTATION_RE.sub("", squad_raw)
                 players = [n.strip() for n in squad_raw.split(",") if n.strip()]
@@ -76,8 +134,40 @@ class WikipediaSource(DataSource):
                 break
         return squads
 
+    def fetch_captains(self, season_id: int) -> dict[str, str]:
+        """Real team -> real captain name, parsed from the "(c)" annotation
+        in the same squad table fetch_squads() reads (which strips that
+        annotation off). Captains and other near-every-match starters are
+        what make a real per-team core XI realistic in the simulator."""
+        known_teams = self.config["teams"]
+        soup = _get_soup(self._season_url(season_id))
+        captains: dict[str, str] = {}
+        for table in soup.find_all("table", class_="wikitable"):
+            header_cells = [c.get_text(strip=True) for c in table.find("tr").find_all(["th", "td"])]
+            if header_cells[:1] not in (["Team"], ["Teams"]):
+                continue
+            if "Playing squads" not in header_cells and "Squad" not in " ".join(header_cells):
+                continue
+            for row in table.find_all("tr")[1:]:
+                cells = row.find_all(["th", "td"])
+                if len(cells) < 3:
+                    continue
+                team = _canonicalize_team(cells[0].get_text(strip=True), known_teams)
+                # Empty separator (not ",") — get_text(",") inserts a comma at every
+                # tag boundary, which splits "Name(c)" into separate "Name" / "(c)"
+                # chunks (the (c) annotation is its own <a> tag) and breaks the
+                # name-to-annotation association this method depends on.
+                squad_raw = cells[-1].get_text("", strip=True)
+                match = re.search(r"([A-Za-z][\w .'\-]*?)\(c[,)]", squad_raw)
+                if match:
+                    captains[team] = match.group(1).strip()
+            if captains:
+                break
+        return captains
+
     def fetch_leaders(self, season_id: int) -> dict[str, pd.DataFrame]:
         """Real season leaderboards: most runs, most wickets."""
+        known_teams = self.config["teams"]
         soup = _get_soup(self._season_url(season_id))
         leaders: dict[str, pd.DataFrame] = {}
         for table in soup.find_all("table", class_="wikitable"):
@@ -90,11 +180,14 @@ class WikipediaSource(DataSource):
             data_rows = [r for r in data_rows if len(r) == len(header)]
             df = pd.DataFrame(data_rows, columns=header)
             df["season"] = season_id
+            if "Team" in df.columns:
+                df["Team"] = df["Team"].apply(lambda t: _canonicalize_team(t, known_teams))
             key = "most_runs" if label == "Most runs" else "most_wickets"
             leaders[key] = df
         return leaders
 
     def fetch_awards(self, season_id: int) -> pd.DataFrame:
+        known_teams = self.config["teams"]
         soup = _get_soup(self._season_url(season_id))
         for table in soup.find_all("table", class_="wikitable"):
             header = [c.get_text(strip=True) for c in table.find("tr").find_all(["th", "td"])]
@@ -103,11 +196,14 @@ class WikipediaSource(DataSource):
                 data_rows = [r for r in rows[1:] if len(r) == len(header)]
                 df = pd.DataFrame(data_rows, columns=header)
                 df["season"] = season_id
+                if "Team" in df.columns:
+                    df["Team"] = df["Team"].apply(lambda t: _canonicalize_team(t, known_teams))
                 return df
         return pd.DataFrame(columns=["Award", "Prize", "Player", "Team", "season"])
 
     def fetch_standings(self, season_id: int) -> pd.DataFrame:
         """Real points table: position, played/won/lost, points, NRR."""
+        known_teams = self.config["teams"]
         soup = _get_soup(self._season_url(season_id))
         for table in soup.find_all("table", class_="wikitable"):
             header = [c.get_text(strip=True) for c in table.find("tr").find_all(["th", "td"])]
@@ -121,6 +217,7 @@ class WikipediaSource(DataSource):
                 df = pd.DataFrame(data_rows, columns=header)
                 df["season"] = season_id
                 df["Team"] = df["Team"].str.replace(r"\s*\([^)]*\)", "", regex=True)
+                df["Team"] = df["Team"].apply(lambda t: _canonicalize_team(t, known_teams))
                 return df
         return pd.DataFrame()
 
@@ -128,6 +225,7 @@ class WikipediaSource(DataSource):
         """Real winner/margin for every league-stage fixture, parsed from
         Wikipedia's home-vs-visitor results grid and resolved to full team
         names (the raw grid only gives abbreviations/city prefixes)."""
+        known_teams = self.config["teams"]
         soup = _get_soup(self._season_url(season_id))
         for table in soup.find_all("table", class_="wikitable"):
             first_row_text = table.find("tr").get_text(" ", strip=True)
@@ -138,7 +236,7 @@ class WikipediaSource(DataSource):
             data_rows = rows[2:]  # row 0 = abbreviations header, row 1 = "Home team" label
 
             home_teams_in_order = [
-                r.find_all(["th", "td"])[0].get_text(strip=True)
+                _canonicalize_team(r.find_all(["th", "td"])[0].get_text(strip=True), known_teams)
                 for r in data_rows if r.find_all(["th", "td"])
             ]
             # Header columns (after the first "Visitor team →" cell) are in the
@@ -150,7 +248,7 @@ class WikipediaSource(DataSource):
                 cells = row.find_all(["th", "td"])
                 if not cells:
                     continue
-                home_team = cells[0].get_text(strip=True)
+                home_team = _canonicalize_team(cells[0].get_text(strip=True), known_teams)
                 for col_idx, cell in enumerate(cells[1:], start=1):
                     text = cell.get_text(" ", strip=True)
                     if not text:
@@ -158,7 +256,9 @@ class WikipediaSource(DataSource):
                     if text.endswith("Super Over"):
                         winner_prefix, margin = text[: -len("Super Over")].strip(), "Super Over"
                     else:
-                        parts = text.rsplit(" ", 1)
+                        # Format is "<city prefix> <N> <runs|wickets|run|wicket>" —
+                        # the prefix is always the first word, margin is everything else.
+                        parts = text.split(" ", 1)
                         if len(parts) != 2:
                             continue
                         winner_prefix, margin = parts
@@ -185,6 +285,7 @@ class WikipediaSource(DataSource):
         powerplay/middle/death — Wikipedia's scorecard doesn't report over-by-over
         timing, and fabricating a phase split for genuinely real figures would
         defeat the point of having a real-data source."""
+        known_teams = self.config["teams"]
         soup = _get_soup(self._season_url(season_id))
         tables = soup.find_all("table", class_="wikitable")
 
@@ -194,7 +295,10 @@ class WikipediaSource(DataSource):
             return pd.DataFrame()
 
         records = []
-        team_names = [t.find("tr").get_text(strip=True).replace(" innings", "") for t in innings_tables[:2]]
+        team_names = [
+            _canonicalize_team(t.find("tr").get_text(strip=True).replace(" innings", ""), known_teams)
+            for t in innings_tables[:2]
+        ]
         winner = None  # Wikipedia summary text states the winner; left unset here since
         # the final's result is already captured authoritatively in fetch_awards()/season
         # standings — avoid guessing it from scorecard order alone.
@@ -220,7 +324,9 @@ class WikipediaSource(DataSource):
             # Identify the bowling side from its own caption ("<Team> bowling")
             # rather than assuming table order — that assumption was the source
             # of a real bug where bowlers were tagged with their opponent's name.
-            bowling_team = bowling_table.find("tr").get_text(strip=True).replace(" bowling", "")
+            bowling_team = _canonicalize_team(
+                bowling_table.find("tr").get_text(strip=True).replace(" bowling", ""), known_teams
+            )
             opponent = next((t for t in team_names if t != bowling_team), bowling_team)
 
             for row in _table_rows(bowling_table)[1:]:

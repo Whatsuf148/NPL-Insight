@@ -229,18 +229,95 @@ with sections[4]:
                          width='stretch')
 
         st.subheader("Player Stats Explorer")
-        st.caption("Every player's full batting, bowling, and fielding line for the current filter selection.")
+        st.caption(
+            "Every player's full batting, bowling, and fielding line for the current filter selection. "
+            "`matches_played_pct` is how often this player appears relative to their team's matches that "
+            "season — useful for spotting whether a name is a regular starter or a bench player in the "
+            "simulated data."
+        )
         stats_table = analytics.player_stats_table(filtered_master)
         search = st.text_input("Search player name", value="", key="player_search")
         if search:
             stats_table = stats_table[stats_table["player"].str.contains(search, case=False, na=False)]
         st.dataframe(
             stats_table[[
-                "season", "player", "team", "matches", "runs", "balls_faced", "strike_rate",
-                "wickets", "overs_bowled", "economy", "catches_taken", "catches_dropped", "stumping_missed",
+                "season", "player", "team", "matches", "matches_played_pct", "runs", "balls_faced",
+                "strike_rate", "wickets", "overs_bowled", "economy",
+                "catches_taken", "catches_dropped", "stumping_missed",
             ]],
             width='stretch', height=400,
         )
+
+        st.subheader("Player Profile")
+        st.caption("Full one-stop summary for a single player: career line, best performances, and impact rank.")
+        profile_players = sorted(filtered_master["player"].unique())
+        if profile_players:
+            profile_player = st.selectbox("Select a player", options=profile_players, key="player_profile_select")
+            profile = analytics.player_profile(filtered_master, features["player_impact_score"], profile_player)
+            if profile:
+                st.write(f"**Teams:** {', '.join(profile['teams'])}  |  **Seasons:** {', '.join(map(str, profile['seasons']))}")
+                st.dataframe(
+                    profile["stats_by_season"][[
+                        "season", "team", "matches", "matches_played_pct", "runs", "strike_rate",
+                        "wickets", "economy", "catches_taken",
+                    ]],
+                    width='stretch', hide_index=True,
+                )
+                pcol1, pcol2 = st.columns(2)
+                with pcol1:
+                    st.caption("Best Batting Performance(s)")
+                    if not profile["best_batting"].empty:
+                        st.dataframe(
+                            profile["best_batting"][["season", "best_score", "balls", "vs", "match"]],
+                            width='stretch', hide_index=True,
+                        )
+                with pcol2:
+                    st.caption("Best Bowling Performance(s)")
+                    if not profile["best_bowling"].empty:
+                        st.dataframe(
+                            profile["best_bowling"][["season", "wickets", "runs_conceded", "vs", "match"]],
+                            width='stretch', hide_index=True,
+                        )
+                if not profile["impact_ranks"].empty:
+                    for _, rank_row in profile["impact_ranks"].iterrows():
+                        st.info(
+                            f"Season {rank_row['season']}: ranked #{rank_row['impact_rank']} of "
+                            f"{rank_row['out_of']} by Player Impact Score."
+                        )
+
+        st.subheader("All-Time Leaders (across all selected seasons)")
+        all_time = analytics.all_time_leaders(filtered_master)
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.caption("Highest Run Scorer")
+            st.dataframe(all_time["runs"], width='stretch', hide_index=True)
+        with col2:
+            st.caption("Highest Wicket Taker")
+            st.dataframe(all_time["wickets"], width='stretch', hide_index=True)
+        with col3:
+            st.caption("Most Catches Taken")
+            st.dataframe(all_time["catches"], width='stretch', hide_index=True)
+
+        st.subheader("Player vs Player")
+        st.caption(
+            "Compares two players' stat lines in every match where both appeared. This is a "
+            "match-level comparison, not a literal ball-by-ball duel — the dataset doesn't track "
+            "which specific ball a batter faced from which specific bowler."
+        )
+        all_players = sorted(filtered_master["player"].unique())
+        if len(all_players) >= 2:
+            pcol1, pcol2 = st.columns(2)
+            with pcol1:
+                player_a = st.selectbox("Player A", options=all_players, key="pvp_a")
+            with pcol2:
+                player_b = st.selectbox(
+                    "Player B", options=[p for p in all_players if p != player_a], key="pvp_b"
+                )
+            matchup = analytics.player_vs_player_matchup(filtered_master, player_a, player_b)
+            if matchup.empty:
+                st.info(f"{player_a} and {player_b} haven't appeared in the same match in the current filters.")
+            else:
+                st.dataframe(matchup, width='stretch', hide_index=True)
 
 # ---------------------------------------------------------------- Season Comparison
 with sections[5]:
@@ -278,6 +355,25 @@ with sections[6]:
         st.info(fact)
 
     try:
+        real_runs = load_table("real_leaders_runs", config)
+        real_wickets = load_table("real_leaders_wickets", config)
+        real_at = analytics.real_all_time_leaders(real_runs, real_wickets)
+        st.subheader("Real All-Time Leaders (combined from each season's published top 5)")
+        st.caption(
+            "A player not in a given season's published top-5 isn't counted for that season — "
+            "this is a lower bound, not an exhaustive career total."
+        )
+        rcol1, rcol2 = st.columns(2)
+        with rcol1:
+            st.caption("Most Runs")
+            st.dataframe(real_at["runs"], width='stretch', hide_index=True)
+        with rcol2:
+            st.caption("Most Wickets")
+            st.dataframe(real_at["wickets"], width='stretch', hide_index=True)
+    except Exception:
+        pass
+
+    try:
         final_scorecards = load_table("real_final_scorecards", config)
         if not final_scorecards.empty:
             st.subheader("Real Final-Match Scorecards")
@@ -291,3 +387,42 @@ with sections[6]:
     except Exception:
         st.caption("Real final-match scorecards not available — run `python run_pipeline.py` with "
                    "data_sources.wikipedia.enabled: true in config/config.yaml.")
+
+    try:
+        standings = load_table("real_standings", config)
+        if not standings.empty:
+            st.subheader("Real Final Standings")
+            standings_season = st.selectbox(
+                "Season", options=sorted(standings["season"].unique()),
+                format_func=lambda sid: next((s["name"] for s in config["seasons"] if s["id"] == sid), sid),
+                key="standings_season",
+            )
+            st.dataframe(
+                standings[standings["season"] == standings_season].drop(columns=["season"]),
+                width='stretch', hide_index=True,
+            )
+    except Exception:
+        pass
+
+    try:
+        head_to_head = load_table("real_head_to_head", config)
+        if not head_to_head.empty:
+            st.subheader("Real Head-to-Head Lookup")
+            all_teams = sorted(set(head_to_head["team_a"]) | set(head_to_head["team_b"]))
+            col1, col2 = st.columns(2)
+            with col1:
+                team_a_choice = st.selectbox("Team A", options=all_teams, key="h2h_team_a")
+            with col2:
+                team_b_choice = st.selectbox(
+                    "Team B", options=[t for t in all_teams if t != team_a_choice], key="h2h_team_b"
+                )
+            record = analytics.head_to_head_record(head_to_head, team_a_choice, team_b_choice)
+            if record.empty:
+                st.caption(f"No recorded fixtures found between {team_a_choice} and {team_b_choice}.")
+            else:
+                wins_a = (record["winner"] == team_a_choice).sum()
+                wins_b = (record["winner"] == team_b_choice).sum()
+                st.info(f"Head-to-head: {team_a_choice} {wins_a} — {wins_b} {team_b_choice}")
+                st.dataframe(record.drop(columns=["team_a", "team_b"]), width='stretch', hide_index=True)
+    except Exception:
+        pass

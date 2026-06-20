@@ -59,6 +59,63 @@ def test_player_stats_table_strike_rate_matches_runs_over_balls(sample_master_df
     assert (nonzero["strike_rate"] == expected).all()
 
 
+def test_player_stats_table_matches_played_pct_is_100_when_player_in_every_team_match(sample_master_df, config):
+    cleaned = clean(sample_master_df, config)
+    table = analytics.player_stats_table(cleaned)
+    # fixture has every player appearing in every one of their team's matches
+    assert (table["matches_played_pct"] == 100.0).all()
+
+
+def test_best_individual_performances_picks_highest_score_per_player(sample_master_df, config):
+    cleaned = clean(sample_master_df, config)
+    best = analytics.best_individual_performances(cleaned)
+    per_match = cleaned.groupby(["season", "player", "match_id"], as_index=False)["runs"].sum()
+    for _, row in best["best_batting"].iterrows():
+        actual_max = per_match[
+            (per_match["season"] == row["season"]) & (per_match["player"] == row["player"])
+        ]["runs"].max()
+        assert row["best_score"] == actual_max
+
+
+def test_best_individual_performances_bowling_ties_broken_by_fewest_runs():
+    import pandas as pd
+
+    df = pd.DataFrame([
+        {"season": 1, "player": "P", "team": "A", "opponent": "B", "match_id": "M1",
+         "overs": 4.0, "economy": 5.0, "wickets": 3, "runs": 0, "balls": 0,
+         "catches_taken": 0, "catches_dropped": 0, "stumping_missed": 0, "fielding_errors": 0,
+         "match_result": "Win", "venue": "X", "phase": "death"},
+        {"season": 1, "player": "P", "team": "A", "opponent": "C", "match_id": "M2",
+         "overs": 4.0, "economy": 3.0, "wickets": 3, "runs": 0, "balls": 0,
+         "catches_taken": 0, "catches_dropped": 0, "stumping_missed": 0, "fielding_errors": 0,
+         "match_result": "Win", "venue": "X", "phase": "death"},
+    ])
+    best = analytics.best_individual_performances(df)
+    row = best["best_bowling"].iloc[0]
+    assert row["match"] == "M2"  # same wickets, fewer runs conceded
+
+
+def test_player_profile_returns_empty_dict_for_unknown_player(sample_master_df, config):
+    cleaned = clean(sample_master_df, config)
+    tables = build_feature_set(cleaned, config)
+    profile = analytics.player_profile(cleaned, tables["player_impact_score"], "Nonexistent Player")
+    assert profile == {}
+
+
+def test_player_profile_impact_rank_is_consistent_with_score_ordering(sample_master_df, config):
+    cleaned = clean(sample_master_df, config)
+    tables = build_feature_set(cleaned, config)
+    impact = tables["player_impact_score"]
+    player = impact.iloc[0]["player"]
+    profile = analytics.player_profile(cleaned, impact, player)
+    for _, rank_row in profile["impact_ranks"].iterrows():
+        season_scores = impact[impact["season"] == rank_row["season"]].sort_values(
+            "player_impact_score", ascending=False
+        ).reset_index(drop=True)
+        expected_rank = season_scores[season_scores["player"] == player].index[0] + 1
+        assert rank_row["impact_rank"] == expected_rank
+
+
 def test_top_wicket_taker_per_opponent_has_one_row_per_season_and_opponent(sample_master_df, config):
     cleaned = clean(sample_master_df, config)
     result = analytics.top_wicket_taker_per_opponent(cleaned)
@@ -76,6 +133,65 @@ def test_best_strike_rate_by_phase_only_includes_configured_phases(sample_master
     cleaned = clean(sample_master_df, config)
     result = analytics.best_strike_rate_by_phase(cleaned, min_balls=10)
     assert set(result["phase"]).issubset(set(config["phases"]))
+
+
+def test_all_time_leaders_sums_runs_across_all_seasons_for_same_player(sample_master_df, config):
+    cleaned = clean(sample_master_df, config)
+    leaders = analytics.all_time_leaders(cleaned)
+    # fixture has "Team A Bat1" scoring 20 runs per phase x 3 phases x 2 matches x 2 seasons
+    expected_total = 20 * 3 * 2 * 2
+    row = leaders["runs"][leaders["runs"]["player"] == "Team A Bat1"]
+    assert row.iloc[0]["runs"] == expected_total
+
+
+def test_all_time_leaders_sorted_descending(sample_master_df, config):
+    cleaned = clean(sample_master_df, config)
+    leaders = analytics.all_time_leaders(cleaned)
+    runs = leaders["runs"]["runs"].tolist()
+    assert runs == sorted(runs, reverse=True)
+
+
+def test_real_all_time_leaders_combines_seasons_for_repeat_players():
+    import pandas as pd
+
+    leaders_runs = pd.DataFrame([
+        {"Player": "X", "Team": "A", "Runs": "100", "season": 1},
+        {"Player": "X", "Team": "A", "Runs": "150", "season": 2},
+        {"Player": "Y", "Team": "B", "Runs": "300", "season": 1},
+    ])
+    leaders_wickets = pd.DataFrame([
+        {"Player": "Z", "Team": "C", "Wickets": "10", "season": 1},
+    ])
+    result = analytics.real_all_time_leaders(leaders_runs, leaders_wickets)
+    x_row = result["runs"][result["runs"]["Player"] == "X"].iloc[0]
+    assert x_row["total_runs"] == 250
+    assert x_row["seasons_in_top5"] == 2
+
+
+def test_player_vs_player_matchup_only_includes_shared_matches(sample_master_df, config):
+    cleaned = clean(sample_master_df, config)
+    players = cleaned["player"].unique()
+    result = analytics.player_vs_player_matchup(cleaned, players[0], players[0])
+    # a player "vs themself" trivially shares every match they're in
+    assert set(result["match_id"]) == set(cleaned.loc[cleaned["player"] == players[0], "match_id"])
+
+
+def test_player_vs_player_matchup_empty_when_no_shared_matches(sample_master_df, config):
+    cleaned = clean(sample_master_df, config)
+    result = analytics.player_vs_player_matchup(cleaned, "Nonexistent Player A", "Nonexistent Player B")
+    assert result.empty
+
+
+def test_head_to_head_record_finds_fixtures_regardless_of_home_away_order():
+    import pandas as pd
+
+    h2h = pd.DataFrame([
+        {"season": 1, "team_a": "Team X", "team_b": "Team Y", "winner": "Team X", "margin": "10 runs"},
+        {"season": 1, "team_a": "Team Y", "team_b": "Team X", "winner": "Team Y", "margin": "3 wickets"},
+        {"season": 1, "team_a": "Team Z", "team_b": "Team Y", "winner": "Team Z", "margin": "1 run"},
+    ])
+    result = analytics.head_to_head_record(h2h, "Team X", "Team Y")
+    assert len(result) == 2
 
 
 def test_fun_facts_returns_fallback_message_when_no_real_tables_exist(monkeypatch, config):

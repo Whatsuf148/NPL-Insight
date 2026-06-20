@@ -36,6 +36,7 @@ def collect_real_enrichment(config: dict | None = None) -> dict:
 
     enrichment = {
         "rosters": {},
+        "captains": {},
         "leaders_runs": [],
         "leaders_wickets": [],
         "awards": [],
@@ -55,6 +56,9 @@ def collect_real_enrichment(config: dict | None = None) -> dict:
             squads = source.fetch_squads(season_id)
             for team, players in squads.items():
                 enrichment["rosters"].setdefault(team, set()).update(players)
+
+            captains = source.fetch_captains(season_id)
+            enrichment["captains"].update(captains)
 
             leaders = source.fetch_leaders(season_id)
             if "most_runs" in leaders:
@@ -106,7 +110,11 @@ def collect_all(config: dict | None = None) -> tuple[dict[int, pd.DataFrame], di
                 raise ValueError(f"Unknown data source '{source_name}' in config.")
             source_config = {**config, **config["data_sources"].get(source_name, {})}
             if source_name == "simulator" and enrichment["rosters"]:
-                source_config = {**source_config, "_real_rosters": enrichment["rosters"]}
+                source_config = {
+                    **source_config,
+                    "_real_rosters": enrichment["rosters"],
+                    "_real_captains": enrichment["captains"],
+                }
 
             source = SOURCE_REGISTRY[source_name](source_config)
             logger.info("Collecting season %s from source '%s'", season_id, source_name)

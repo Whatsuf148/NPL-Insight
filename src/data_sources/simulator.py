@@ -42,15 +42,15 @@ class SimulatorSource(DataSource):
                     break
                 match_id = f"S{season_id}M{match_id_counter:03d}"
                 venue = rng.choice(venues)
-                winner = rng.choice([home, away])
                 match_id_counter += 1
 
+                team_rows = {home: [], away: []}
+                team_score = {}
                 for team, opponent in [(home, away), (away, home)]:
-                    match_result = "Win" if team == winner else "Loss"
-                    # pick a playing subset for this match
                     playing_xi = rng.choice(rosters[team], size=11, replace=False)
                     bowlers = rng.choice(playing_xi, size=6, replace=False)
 
+                    total_runs = total_wickets = total_errors = 0
                     for player in playing_xi:
                         is_bowler = player in bowlers
                         for phase in phases:
@@ -68,7 +68,11 @@ class SimulatorSource(DataSource):
                             stumping_missed = int(rng.binomial(1, 0.02))
                             fielding_errors = int(rng.binomial(1, 0.07))
 
-                            records.append({
+                            total_runs += runs
+                            total_wickets += wickets
+                            total_errors += catches_dropped + stumping_missed + fielding_errors
+
+                            team_rows[team].append({
                                 "match_id": match_id,
                                 "season": season_id,
                                 "team": team,
@@ -84,10 +88,24 @@ class SimulatorSource(DataSource):
                                 "catches_dropped": catches_dropped,
                                 "stumping_missed": stumping_missed,
                                 "fielding_errors": fielding_errors,
-                                "match_result": match_result,
                                 "venue": venue,
                                 "phase": phase,
                             })
+
+                    # Match strength score: runs scored, wickets taken with the ball, and
+                    # fielding errors conceded all genuinely drive the outcome — this keeps
+                    # match_result causally linked to performance instead of independent of it,
+                    # so downstream win-probability modeling has real signal to learn from.
+                    upset_noise = rng.normal(0, 15)
+                    team_score[team] = total_runs + total_wickets * 6 - total_errors * 4 + upset_noise
+
+                winner = home if team_score[home] >= team_score[away] else away
+                for team in (home, away):
+                    match_result = "Win" if team == winner else "Loss"
+                    for row in team_rows[team]:
+                        row["match_result"] = match_result
+                        records.append(row)
+
                 if match_id_counter > matches_per_season:
                     break
 

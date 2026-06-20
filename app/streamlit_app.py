@@ -1,0 +1,224 @@
+"""NPL Insight — Streamlit dashboard.
+
+Reads exclusively from the processed master dataset + feature tables
+(no hardcoded numbers/teams/players anywhere) and is organized around
+the six sections from the project spec. Every section pairs a chart
+with a generated insight statement, so the page reads as analysis,
+not just visuals.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import plotly.express as px
+import streamlit as st
+
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+
+from src import analytics
+from src.config import load_config
+from src.storage import load_table
+
+st.set_page_config(page_title="NPL Insight", layout="wide", page_icon="🏏")
+
+config = load_config()
+
+
+@st.cache_data
+def get_data():
+    master_df = load_table("master_dataset", config)
+    features = {
+        name: load_table(name, config)
+        for name in [
+            "batting_by_phase", "boundary_percentage", "consistency_index",
+            "bowling_by_phase", "dot_ball_percentage", "fielding",
+            "player_impact_score", "clutch_performance_index",
+            "pressure_performance_score", "win_contribution_pct",
+        ]
+    }
+    return master_df, features
+
+
+try:
+    master_df, features = get_data()
+except Exception as e:
+    st.error(
+        "Processed dataset not found or failed to load. Run `python run_pipeline.py` "
+        f"first to generate it.\n\nDetails: {e}"
+    )
+    st.stop()
+
+season_lookup = {s["name"]: s["id"] for s in config["seasons"]}
+
+st.sidebar.title("🏏 NPL Insight")
+st.sidebar.caption("Nepal Premier League Advanced Analytics")
+
+selected_season_names = st.sidebar.multiselect(
+    "Season", options=list(season_lookup.keys()), default=list(season_lookup.keys())
+)
+selected_seasons = [season_lookup[n] for n in selected_season_names] or list(season_lookup.values())
+
+teams_available = sorted(master_df[master_df["season"].isin(selected_seasons)]["team"].unique())
+selected_teams = st.sidebar.multiselect("Team", options=teams_available, default=teams_available)
+
+filtered_for_players = master_df[
+    master_df["season"].isin(selected_seasons) & master_df["team"].isin(selected_teams)
+]
+players_available = sorted(filtered_for_players["player"].unique())
+selected_players = st.sidebar.multiselect("Player", options=players_available, default=[])
+
+matches_available = sorted(filtered_for_players["match_id"].unique())
+selected_match = st.sidebar.selectbox("Match (for drill-down)", options=["All"] + matches_available)
+
+selected_phases = st.sidebar.multiselect(
+    "Phase", options=config["phases"], default=config["phases"]
+)
+
+
+def apply_filters(df):
+    out = df[df["season"].isin(selected_seasons)] if "season" in df.columns else df
+    if "team" in out.columns:
+        out = out[out["team"].isin(selected_teams)]
+    if selected_players and "player" in out.columns:
+        out = out[out["player"].isin(selected_players)]
+    if "phase" in out.columns:
+        out = out[out["phase"].isin(selected_phases)]
+    return out
+
+
+filtered_master = apply_filters(master_df)
+
+sections = st.tabs([
+    "Match Overview", "Batting Analysis", "Bowling Analysis",
+    "Fielding Insights", "Player Insights", "Season Comparison",
+])
+
+# ---------------------------------------------------------------- Match Overview
+with sections[0]:
+    st.header("Match Overview")
+    if filtered_master.empty:
+        st.warning("No data for the current filter selection.")
+    else:
+        match_scope = filtered_master if selected_match == "All" else filtered_master[filtered_master["match_id"] == selected_match]
+        score_summary = match_scope.groupby(["match_id", "team"], as_index=False)["runs"].sum()
+        fig = px.bar(score_summary, x="match_id", y="runs", color="team", barmode="group",
+                     title="Score Summary by Match")
+        st.plotly_chart(fig, use_container_width=True)
+
+        if selected_match != "All":
+            st.subheader("Drill-down Insights")
+            for insight in analytics.generate_match_insights(master_df, selected_match):
+                st.info(insight)
+
+        progression = match_scope.groupby(["match_id", "phase"], as_index=False)["runs"].sum()
+        fig2 = px.line(progression, x="phase", y="runs", color="match_id", markers=True,
+                        title="Run Progression by Phase")
+        st.plotly_chart(fig2, use_container_width=True)
+
+# ---------------------------------------------------------------- Batting Analysis
+with sections[1]:
+    st.header("Batting Analysis")
+    batting = apply_filters(features["batting_by_phase"])
+    if batting.empty:
+        st.warning("No batting data for the current filter selection.")
+    else:
+        fig = px.bar(batting, x="player", y="strike_rate_by_phase", color="phase", barmode="group",
+                     title="Strike Rate by Phase")
+        st.plotly_chart(fig, use_container_width=True)
+
+        top_sr = batting.loc[batting["strike_rate_by_phase"].idxmax()]
+        st.success(
+            f"Insight: {top_sr['player']} ({top_sr['team']}) posts the highest phase strike rate "
+            f"at {top_sr['strike_rate_by_phase']} during the {top_sr['phase']} phase."
+        )
+
+        consistency = apply_filters(features["consistency_index"])
+        fig2 = px.bar(consistency.sort_values("consistency_index", ascending=False).head(15),
+                      x="player", y="consistency_index", color="team", title="Consistency Index (Top 15)")
+        st.plotly_chart(fig2, use_container_width=True)
+
+# ---------------------------------------------------------------- Bowling Analysis
+with sections[2]:
+    st.header("Bowling Analysis")
+    bowling = apply_filters(features["bowling_by_phase"])
+    if bowling.empty:
+        st.warning("No bowling data for the current filter selection.")
+    else:
+        fig = px.box(bowling, x="phase", y="economy_by_phase", color="phase", title="Economy vs Phase")
+        st.plotly_chart(fig, use_container_width=True)
+
+        wicket_dist = bowling.groupby("player", as_index=False)["wicket_probability"].mean()
+        fig2 = px.bar(wicket_dist.sort_values("wicket_probability", ascending=False).head(15),
+                      x="player", y="wicket_probability", title="Wicket Probability (Top 15)")
+        st.plotly_chart(fig2, use_container_width=True)
+
+        cheapest = bowling.loc[bowling["economy_by_phase"].idxmin()] if bowling["economy_by_phase"].gt(0).any() else None
+        if cheapest is not None:
+            st.success(
+                f"Insight: {cheapest['player']} is the most economical bowler in the {cheapest['phase']} "
+                f"phase, conceding at {cheapest['economy_by_phase']} runs/over."
+            )
+
+# ---------------------------------------------------------------- Fielding Insights
+with sections[3]:
+    st.header("Fielding Insights (Key Differentiator)")
+    fielding = apply_filters(features["fielding"])
+    if fielding.empty:
+        st.warning("No fielding data for the current filter selection.")
+    else:
+        leaderboard = analytics.catch_drop_leaderboard(fielding)
+        fig = px.bar(leaderboard.head(15), x="player", y="catches_dropped", color="team",
+                     title="Catch Drop Leaderboard")
+        st.plotly_chart(fig, use_container_width=True)
+
+        best_fielders = analytics.best_fielders_ranking(fielding)
+        fig2 = px.bar(best_fielders.head(15), x="player", y="catch_efficiency", color="team",
+                      title="Best Fielders Ranking (Catch Efficiency)")
+        st.plotly_chart(fig2, use_container_width=True)
+
+        total_lost = int(fielding["runs_lost_to_errors"].sum())
+        st.warning(f"Insight: Estimated {total_lost} runs lost across selected teams/players due to dropped catches and missed stumpings.")
+
+# ---------------------------------------------------------------- Player Insights
+with sections[4]:
+    st.header("Player Insights")
+    impact = apply_filters(features["player_impact_score"])
+    if impact.empty:
+        st.warning("No player data for the current filter selection.")
+    else:
+        rankings = analytics.player_rankings(impact, config=config)
+        fig = px.bar(rankings, x="player", y="player_impact_score", color="team",
+                     title="Player Impact Score Ranking")
+        st.plotly_chart(fig, use_container_width=True)
+
+        change = analytics.player_performance_change(features["player_impact_score"], config)
+        if "impact_score_change" in change.columns:
+            st.subheader("Performance Consistency / Season-over-Season Change")
+            st.dataframe(change[["player", "team", "impact_score_change"]].dropna().head(15),
+                         use_container_width=True)
+
+# ---------------------------------------------------------------- Season Comparison
+with sections[5]:
+    st.header("Season Comparison")
+    comparison = analytics.season_comparison(master_df, config)
+    if len(comparison) < 2:
+        st.warning("Need data from at least two seasons to compare — check both seasons are selected.")
+    else:
+        col1, col2 = st.columns(2)
+        with col1:
+            fig = px.bar(comparison, x="season_name", y="total_runs", title="Total Runs by Season")
+            st.plotly_chart(fig, use_container_width=True)
+        with col2:
+            fig2 = px.bar(comparison, x="season_name", y="avg_strike_rate", title="Average Strike Rate by Season")
+            st.plotly_chart(fig2, use_container_width=True)
+
+        st.dataframe(comparison, use_container_width=True)
+
+        s1, s2 = comparison.iloc[0], comparison.iloc[-1]
+        run_delta = s2["total_runs"] - s1["total_runs"]
+        direction = "increased" if run_delta > 0 else "decreased"
+        st.success(
+            f"Insight: Total runs scored {direction} by {abs(int(run_delta))} between "
+            f"{s1['season_name']} and {s2['season_name']}."
+        )

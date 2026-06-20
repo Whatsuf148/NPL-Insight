@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+data/raw/*.csv
+data/processed/*.csv
+data/processed/*.db
+models/*.pkl
+.streamlit/

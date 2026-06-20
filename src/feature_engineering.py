@@ -93,9 +93,9 @@ def fielding_metrics(df: pd.DataFrame) -> pd.DataFrame:
     return g
 
 
-def player_impact_score(batting: pd.DataFrame, bowling: pd.DataFrame, fielding: pd.DataFrame) -> pd.DataFrame:
+def player_impact_score(batting: pd.DataFrame, master_df: pd.DataFrame, fielding: pd.DataFrame) -> pd.DataFrame:
     bat = batting.groupby(["season", "player", "team"], as_index=False).agg(runs=("runs", "sum"))
-    bowl = bowling.groupby(["season", "player", "team"], as_index=False).agg(wickets=("wickets", "sum"))
+    bowl = master_df.groupby(["season", "player", "team"], as_index=False).agg(wickets=("wickets", "sum"))
     merged = bat.merge(bowl, on=["season", "player", "team"], how="outer").merge(
         fielding[["season", "player", "team", "catch_efficiency", "fielding_error_rate"]],
         on=["season", "player", "team"], how="outer"
@@ -170,7 +170,7 @@ def build_feature_set(master_df: pd.DataFrame, config: dict | None = None) -> di
         "bowling_by_phase": bowling,
         "dot_ball_percentage": dot_ball_percentage(master_df),
         "fielding": fielding,
-        "player_impact_score": player_impact_score(batting, bowling, fielding),
+        "player_impact_score": player_impact_score(batting, master_df, fielding),
         "clutch_performance_index": clutch_performance_index(master_df, config),
         "pressure_performance_score": pressure_performance_score(master_df, config),
         "win_contribution_pct": win_contribution_percentage(batting, master_df),

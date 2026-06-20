@@ -106,6 +106,78 @@ class WikipediaSource(DataSource):
                 return df
         return pd.DataFrame(columns=["Award", "Prize", "Player", "Team", "season"])
 
+    def fetch_standings(self, season_id: int) -> pd.DataFrame:
+        """Real points table: position, played/won/lost, points, NRR."""
+        soup = _get_soup(self._season_url(season_id))
+        for table in soup.find_all("table", class_="wikitable"):
+            header = [c.get_text(strip=True) for c in table.find("tr").find_all(["th", "td"])]
+            if header[:2] == ["Pos", "Team"]:
+                rows = _table_rows(table)
+                data_rows = []
+                for r in rows[1:]:
+                    if len(r) < len(header):
+                        r = r + [""] * (len(header) - len(r))
+                    data_rows.append(r[: len(header)])
+                df = pd.DataFrame(data_rows, columns=header)
+                df["season"] = season_id
+                df["Team"] = df["Team"].str.replace(r"\s*\([^)]*\)", "", regex=True)
+                return df
+        return pd.DataFrame()
+
+    def fetch_head_to_head(self, season_id: int) -> pd.DataFrame:
+        """Real winner/margin for every league-stage fixture, parsed from
+        Wikipedia's home-vs-visitor results grid and resolved to full team
+        names (the raw grid only gives abbreviations/city prefixes)."""
+        soup = _get_soup(self._season_url(season_id))
+        for table in soup.find_all("table", class_="wikitable"):
+            first_row_text = table.find("tr").get_text(" ", strip=True)
+            if "Visitor team" not in first_row_text:
+                continue
+            rows = table.find_all("tr")
+            header_cells = [c.get_text(strip=True) for c in rows[0].find_all(["th", "td"])]
+            data_rows = rows[2:]  # row 0 = abbreviations header, row 1 = "Home team" label
+
+            home_teams_in_order = [
+                r.find_all(["th", "td"])[0].get_text(strip=True)
+                for r in data_rows if r.find_all(["th", "td"])
+            ]
+            # Header columns (after the first "Visitor team →" cell) are in the
+            # same team order as the row order, since it's a symmetric NxN grid.
+            abbrev_to_team = dict(zip(header_cells[1:], home_teams_in_order))
+
+            records = []
+            for row in data_rows:
+                cells = row.find_all(["th", "td"])
+                if not cells:
+                    continue
+                home_team = cells[0].get_text(strip=True)
+                for col_idx, cell in enumerate(cells[1:], start=1):
+                    text = cell.get_text(" ", strip=True)
+                    if not text:
+                        continue
+                    if text.endswith("Super Over"):
+                        winner_prefix, margin = text[: -len("Super Over")].strip(), "Super Over"
+                    else:
+                        parts = text.rsplit(" ", 1)
+                        if len(parts) != 2:
+                            continue
+                        winner_prefix, margin = parts
+                    visitor_abbrev = header_cells[col_idx] if col_idx < len(header_cells) else ""
+                    visitor_team = abbrev_to_team.get(visitor_abbrev, visitor_abbrev)
+                    winner_team = next(
+                        (t for t in (home_team, visitor_team) if t.split()[0] == winner_prefix),
+                        winner_prefix,
+                    )
+                    records.append({
+                        "season": season_id,
+                        "team_a": home_team,
+                        "team_b": visitor_team,
+                        "winner": winner_team,
+                        "margin": margin,
+                    })
+            return pd.DataFrame.from_records(records)
+        return pd.DataFrame()
+
     def fetch(self, season_id: int) -> pd.DataFrame:
         """Satisfies the DataSource interface: returns the one real, full match
         scorecard Wikipedia publishes (the final), reshaped to the master schema.
@@ -144,7 +216,13 @@ class WikipediaSource(DataSource):
                     "phase": "match_total",
                 })
 
-        for bowling_table, conceding_team, opponent in zip(bowling_tables[:2], reversed(team_names), team_names):
+        for bowling_table in bowling_tables[:2]:
+            # Identify the bowling side from its own caption ("<Team> bowling")
+            # rather than assuming table order — that assumption was the source
+            # of a real bug where bowlers were tagged with their opponent's name.
+            bowling_team = bowling_table.find("tr").get_text(strip=True).replace(" bowling", "")
+            opponent = next((t for t in team_names if t != bowling_team), bowling_team)
+
             for row in _table_rows(bowling_table)[1:]:
                 if len(row) < 6:
                     continue
@@ -154,8 +232,8 @@ class WikipediaSource(DataSource):
                 overs_f = float(overs)
                 runs_i = int(runs) if runs.isdigit() else 0
                 records.append({
-                    "match_id": f"S{season_id}_FINAL", "season": season_id, "team": opponent,
-                    "opponent": conceding_team, "player": player,
+                    "match_id": f"S{season_id}_FINAL", "season": season_id, "team": bowling_team,
+                    "opponent": opponent, "player": player,
                     "runs": 0, "balls": 0, "strike_rate": 0.0,
                     "wickets": int(wickets) if wickets.isdigit() else 0, "overs": overs_f,
                     "economy": round(runs_i / overs_f, 2) if overs_f else 0.0,

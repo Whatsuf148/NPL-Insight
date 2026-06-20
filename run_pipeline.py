@@ -45,6 +45,10 @@ def main():
         save_table("real_awards", pd.concat(enrichment["awards"], ignore_index=True), config)
     if enrichment["final_scorecards"]:
         save_table("real_final_scorecards", pd.concat(enrichment["final_scorecards"], ignore_index=True), config)
+    if enrichment["standings"]:
+        save_table("real_standings", pd.concat(enrichment["standings"], ignore_index=True), config)
+    if enrichment["head_to_head"]:
+        save_table("real_head_to_head", pd.concat(enrichment["head_to_head"], ignore_index=True), config)
     logger.info("  real squads collected for %d teams", len(enrichment["rosters"]))
 
     logger.info("Step 5/5: Pipeline complete. Launch the dashboard with:")

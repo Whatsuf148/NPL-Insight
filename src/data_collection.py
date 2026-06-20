@@ -40,6 +40,8 @@ def collect_real_enrichment(config: dict | None = None) -> dict:
         "leaders_wickets": [],
         "awards": [],
         "final_scorecards": [],
+        "standings": [],
+        "head_to_head": [],
     }
 
     wikipedia_config = config["data_sources"].get("wikipedia", {})
@@ -63,6 +65,14 @@ def collect_real_enrichment(config: dict | None = None) -> dict:
             awards = source.fetch_awards(season_id)
             if not awards.empty:
                 enrichment["awards"].append(awards)
+
+            standings = source.fetch_standings(season_id)
+            if not standings.empty:
+                enrichment["standings"].append(standings)
+
+            head_to_head = source.fetch_head_to_head(season_id)
+            if not head_to_head.empty:
+                enrichment["head_to_head"].append(head_to_head)
 
             final_scorecard = source.fetch(season_id)
             if not final_scorecard.empty:

@@ -91,7 +91,7 @@ filtered_master = apply_filters(master_df)
 
 sections = st.tabs([
     "Match Overview", "Batting Analysis", "Bowling Analysis",
-    "Fielding Insights", "Player Insights", "Season Comparison",
+    "Fielding Insights", "Player Insights", "Season Comparison", "Fun Facts",
 ])
 
 # ---------------------------------------------------------------- Match Overview
@@ -104,7 +104,7 @@ with sections[0]:
         score_summary = match_scope.groupby(["match_id", "team"], as_index=False)["runs"].sum()
         fig = px.bar(score_summary, x="match_id", y="runs", color="team", barmode="group",
                      title="Score Summary by Match")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
         if selected_match != "All":
             st.subheader("Drill-down Insights")
@@ -114,7 +114,7 @@ with sections[0]:
         progression = match_scope.groupby(["match_id", "phase"], as_index=False)["runs"].sum()
         fig2 = px.line(progression, x="phase", y="runs", color="match_id", markers=True,
                         title="Run Progression by Phase")
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width='stretch')
 
 # ---------------------------------------------------------------- Batting Analysis
 with sections[1]:
@@ -125,7 +125,7 @@ with sections[1]:
     else:
         fig = px.bar(batting, x="player", y="strike_rate_by_phase", color="phase", barmode="group",
                      title="Strike Rate by Phase")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
         top_sr = batting.loc[batting["strike_rate_by_phase"].idxmax()]
         st.success(
@@ -136,7 +136,24 @@ with sections[1]:
         consistency = apply_filters(features["consistency_index"])
         fig2 = px.bar(consistency.sort_values("consistency_index", ascending=False).head(15),
                       x="player", y="consistency_index", color="team", title="Consistency Index (Top 15)")
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width='stretch')
+
+        st.subheader("Best Strike Rate by Phase (qualified, min. balls faced)")
+        sr_by_phase = analytics.best_strike_rate_by_phase(filtered_master, min_balls=10)
+        if sr_by_phase.empty:
+            st.info("No players meet the minimum-balls-faced threshold for the current filters.")
+        else:
+            powerplay_leaders = sr_by_phase[sr_by_phase["phase"] == "powerplay"]
+            if not powerplay_leaders.empty:
+                pp_top = powerplay_leaders.sort_values("strike_rate", ascending=False).iloc[0]
+                st.success(
+                    f"Insight: {pp_top['player']} ({pp_top['team']}) has the best powerplay strike rate "
+                    f"at {pp_top['strike_rate']} (qualified on {int(pp_top['balls'])} balls faced)."
+                )
+            st.dataframe(
+                sr_by_phase[["season", "phase", "player", "team", "runs", "balls", "strike_rate"]],
+                width='stretch',
+            )
 
 # ---------------------------------------------------------------- Bowling Analysis
 with sections[2]:
@@ -146,18 +163,31 @@ with sections[2]:
         st.warning("No bowling data for the current filter selection.")
     else:
         fig = px.box(bowling, x="phase", y="economy_by_phase", color="phase", title="Economy vs Phase")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
         wicket_dist = bowling.groupby("player", as_index=False)["wicket_probability"].mean()
         fig2 = px.bar(wicket_dist.sort_values("wicket_probability", ascending=False).head(15),
                       x="player", y="wicket_probability", title="Wicket Probability (Top 15)")
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width='stretch')
 
         cheapest = bowling.loc[bowling["economy_by_phase"].idxmin()] if bowling["economy_by_phase"].gt(0).any() else None
         if cheapest is not None:
             st.success(
                 f"Insight: {cheapest['player']} is the most economical bowler in the {cheapest['phase']} "
                 f"phase, conceding at {cheapest['economy_by_phase']} runs/over."
+            )
+
+        st.subheader("Highest Wicket-Taker Against Each Team")
+        matchups = analytics.top_wicket_taker_per_opponent(filtered_master)
+        if matchups.empty:
+            st.info("No bowling matchup data for the current filters.")
+        else:
+            fig3 = px.bar(matchups, x="against_team", y="wickets", color="player",
+                          title="Top Bowler vs Each Opponent", text="player")
+            st.plotly_chart(fig3, width='stretch')
+            st.dataframe(
+                matchups[["season", "against_team", "player", "team", "wickets"]],
+                width='stretch',
             )
 
 # ---------------------------------------------------------------- Fielding Insights
@@ -170,12 +200,12 @@ with sections[3]:
         leaderboard = analytics.catch_drop_leaderboard(fielding)
         fig = px.bar(leaderboard.head(15), x="player", y="catches_dropped", color="team",
                      title="Catch Drop Leaderboard")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
         best_fielders = analytics.best_fielders_ranking(fielding)
         fig2 = px.bar(best_fielders.head(15), x="player", y="catch_efficiency", color="team",
                       title="Best Fielders Ranking (Catch Efficiency)")
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width='stretch')
 
         total_lost = int(fielding["runs_lost_to_errors"].sum())
         st.warning(f"Insight: Estimated {total_lost} runs lost across selected teams/players due to dropped catches and missed stumpings.")
@@ -190,13 +220,27 @@ with sections[4]:
         rankings = analytics.player_rankings(impact, config=config)
         fig = px.bar(rankings, x="player", y="player_impact_score", color="team",
                      title="Player Impact Score Ranking")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
         change = analytics.player_performance_change(features["player_impact_score"], config)
         if "impact_score_change" in change.columns:
             st.subheader("Performance Consistency / Season-over-Season Change")
             st.dataframe(change[["player", "team", "impact_score_change"]].dropna().head(15),
-                         use_container_width=True)
+                         width='stretch')
+
+        st.subheader("Player Stats Explorer")
+        st.caption("Every player's full batting, bowling, and fielding line for the current filter selection.")
+        stats_table = analytics.player_stats_table(filtered_master)
+        search = st.text_input("Search player name", value="", key="player_search")
+        if search:
+            stats_table = stats_table[stats_table["player"].str.contains(search, case=False, na=False)]
+        st.dataframe(
+            stats_table[[
+                "season", "player", "team", "matches", "runs", "balls_faced", "strike_rate",
+                "wickets", "overs_bowled", "economy", "catches_taken", "catches_dropped", "stumping_missed",
+            ]],
+            width='stretch', height=400,
+        )
 
 # ---------------------------------------------------------------- Season Comparison
 with sections[5]:
@@ -208,12 +252,12 @@ with sections[5]:
         col1, col2 = st.columns(2)
         with col1:
             fig = px.bar(comparison, x="season_name", y="total_runs", title="Total Runs by Season")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
         with col2:
             fig2 = px.bar(comparison, x="season_name", y="avg_strike_rate", title="Average Strike Rate by Season")
-            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig2, width='stretch')
 
-        st.dataframe(comparison, use_container_width=True)
+        st.dataframe(comparison, width='stretch')
 
         s1, s2 = comparison.iloc[0], comparison.iloc[-1]
         run_delta = s2["total_runs"] - s1["total_runs"]
@@ -222,3 +266,28 @@ with sections[5]:
             f"Insight: Total runs scored {direction} by {abs(int(run_delta))} between "
             f"{s1['season_name']} and {s2['season_name']}."
         )
+
+# ---------------------------------------------------------------- Fun Facts
+with sections[6]:
+    st.header("🎉 Fun Facts")
+    st.caption(
+        "Real, verified NPL facts sourced from Wikipedia's season articles "
+        "(src/data_sources/wikipedia.py) — not estimated or simulated numbers."
+    )
+    for fact in analytics.fun_facts(config):
+        st.info(fact)
+
+    try:
+        final_scorecards = load_table("real_final_scorecards", config)
+        if not final_scorecards.empty:
+            st.subheader("Real Final-Match Scorecards")
+            for season_id, group in final_scorecards.groupby("season"):
+                season_name = next((s["name"] for s in config["seasons"] if s["id"] == season_id), season_id)
+                with st.expander(f"{season_name} Final"):
+                    st.dataframe(
+                        group[["team", "player", "runs", "balls", "wickets", "overs", "economy"]],
+                        width='stretch',
+                    )
+    except Exception:
+        st.caption("Real final-match scorecards not available — run `python run_pipeline.py` with "
+                   "data_sources.wikipedia.enabled: true in config/config.yaml.")

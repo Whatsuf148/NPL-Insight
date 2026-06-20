@@ -89,6 +89,112 @@ def generate_match_insights(master_df: pd.DataFrame, match_id: str) -> list[str]
     return insights
 
 
+def player_stats_table(master_df: pd.DataFrame, season: int | None = None) -> pd.DataFrame:
+    """Per-player, per-team career line across the selected scope — the
+    detailed name+stats view, not just aggregate leaderboards."""
+    df = master_df if season is None else master_df[master_df["season"] == season]
+    bowled = df[df["overs"] > 0]
+    runs_conceded = (bowled["economy"] * bowled["overs"]).groupby(
+        [bowled["season"], bowled["player"], bowled["team"]]
+    ).sum()
+
+    table = df.groupby(["season", "player", "team"], as_index=False).agg(
+        matches=("match_id", "nunique"),
+        runs=("runs", "sum"),
+        balls_faced=("balls", "sum"),
+        wickets=("wickets", "sum"),
+        overs_bowled=("overs", "sum"),
+        catches_taken=("catches_taken", "sum"),
+        catches_dropped=("catches_dropped", "sum"),
+        stumping_missed=("stumping_missed", "sum"),
+    )
+    import numpy as np
+
+    table["strike_rate"] = (table["runs"] / table["balls_faced"].replace(0, np.nan) * 100).round(2).fillna(0.0)
+    runs_conceded = runs_conceded.reset_index(name="runs_conceded")
+    table = table.merge(runs_conceded, on=["season", "player", "team"], how="left")
+    table["runs_conceded"] = table["runs_conceded"].fillna(0)
+    table["economy"] = (table["runs_conceded"] / table["overs_bowled"].replace(0, np.nan)).round(2).fillna(0.0)
+    return table.drop(columns=["runs_conceded"]).sort_values("runs", ascending=False).reset_index(drop=True)
+
+
+def top_wicket_taker_per_opponent(master_df: pd.DataFrame, season: int | None = None) -> pd.DataFrame:
+    """Answers: who is the most dangerous bowler against each specific
+    opponent team — a matchup-level insight, not a tournament-wide average."""
+    df = master_df if season is None else master_df[master_df["season"] == season]
+    bowled = df[df["overs"] > 0]
+    by_matchup = bowled.groupby(["season", "opponent", "player", "team"], as_index=False)["wickets"].sum()
+    top = by_matchup.sort_values("wickets", ascending=False).groupby(["season", "opponent"], as_index=False).first()
+    return top.rename(columns={"opponent": "against_team"}).sort_values(
+        ["season", "wickets"], ascending=[True, False]
+    ).reset_index(drop=True)
+
+
+def best_strike_rate_by_phase(master_df: pd.DataFrame, season: int | None = None, min_balls: int = 10) -> pd.DataFrame:
+    """Answers: who scores fastest in each phase of the innings (powerplay,
+    middle, death) — qualifying on a minimum-balls-faced threshold so a
+    two-ball cameo can't top the list."""
+    df = master_df if season is None else master_df[master_df["season"] == season]
+    by_phase_player = df.groupby(["season", "phase", "player", "team"], as_index=False).agg(
+        runs=("runs", "sum"), balls=("balls", "sum")
+    )
+    qualifying = by_phase_player[by_phase_player["balls"] >= min_balls].copy()
+    qualifying["strike_rate"] = (qualifying["runs"] / qualifying["balls"] * 100).round(2)
+    return qualifying.sort_values(["phase", "strike_rate"], ascending=[True, False]).groupby(
+        ["season", "phase"], as_index=False
+    ).head(5).reset_index(drop=True)
+
+
+def fun_facts(config: dict | None = None) -> list[str]:
+    """Real, verified facts about the NPL — sourced from the season's real
+    leaderboards/awards tables, not generated/estimated numbers. Falls back
+    gracefully if real-data enrichment tables aren't present (e.g.
+    `data_sources.wikipedia.enabled: false`)."""
+    from src.storage import load_table
+
+    config = config or load_config()
+    season_names = {s["id"]: s["name"] for s in config["seasons"]}
+    facts: list[str] = []
+
+    try:
+        runs_leaders = load_table("real_leaders_runs", config)
+        for season_id, group in runs_leaders.groupby("season"):
+            top = group.iloc[0]
+            facts.append(
+                f"{season_names.get(season_id, f'Season {season_id}')}: "
+                f"{top['Player']} ({top['Team']}) was the leading run-scorer with {top['Runs']} runs."
+            )
+    except Exception:
+        pass
+
+    try:
+        wicket_leaders = load_table("real_leaders_wickets", config)
+        for season_id, group in wicket_leaders.groupby("season"):
+            top = group.iloc[0]
+            facts.append(
+                f"{season_names.get(season_id, f'Season {season_id}')}: "
+                f"{top['Player']} ({top['Team']}) led the wickets column with {top['Wickets']} dismissals."
+            )
+    except Exception:
+        pass
+
+    try:
+        awards = load_table("real_awards", config)
+        potm_rows = awards[awards["Award"].str.contains("tournament", case=False, na=False)]
+        for _, row in potm_rows.head(4).iterrows():
+            season_label = season_names.get(row["season"], f"Season {row['season']}")
+            facts.append(f"{season_label} — {row['Award']}: {row['Player']} ({row.get('Team', 'N/A')}).")
+    except Exception:
+        pass
+
+    if not facts:
+        facts.append(
+            "No real-data facts available — enable data_sources.wikipedia in "
+            "config/config.yaml and re-run the pipeline to populate this section."
+        )
+    return facts
+
+
 def win_probability_features(master_df: pd.DataFrame) -> pd.DataFrame:
     """Match-team level feature table feeding the win-probability model in models/."""
     g = master_df.groupby(["season", "match_id", "team"], as_index=False).agg(

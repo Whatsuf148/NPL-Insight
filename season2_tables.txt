@@ -1,0 +1,17 @@
+16 tables
+0 ['Team', 'Captain', 'Head coach'] rows: 9
+1 ['Biratnagar Kings', 'Chitwan Rhinos', 'Janakpur Bolts'] rows: 4
+2 ['Pos', 'Team', 'Pld'] rows: 9
+3 ['Team', 'Group matches', 'Playoffs'] rows: 10
+4 ['Win', 'Loss', 'No result'] rows: 1
+5 ['Visitor team →', 'BK', 'CR'] rows: 10
+6 ['Home team won', 'Visitor team won'] rows: 1
+7 ['Sudurpaschim Royals innings'] rows: 14
+8 ['Lumbini Lions bowling'] rows: 8
+9 ['Lumbini Lions innings'] rows: 9
+10 ['Sudurpaschim Royals bowling'] rows: 8
+11 Highest team totals rows: 7
+12 Most runs rows: 7
+13 Most wickets rows: 7
+14 ['Award', 'Prize', 'Player'] rows: 12
+15 ['Country', 'TV', 'Internet'] rows: 9

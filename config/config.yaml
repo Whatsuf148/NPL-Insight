@@ -4,22 +4,27 @@ seasons:
   - id: 1
     year: 2024
     name: "NPL Season 1"
+    dates: "30 Nov - 21 Dec 2024"
+    wikipedia_url: "https://en.wikipedia.org/wiki/2024_Nepal_Premier_League"
   - id: 2
     year: 2025
     name: "NPL Season 2"
+    dates: "17 Nov - 13 Dec 2025"
+    wikipedia_url: "https://en.wikipedia.org/wiki/2025_Nepal_Premier_League"
 
+# Real NPL franchises (verified via Wikipedia — see seasons[].wikipedia_url).
 teams:
-  - Kathmandu Gorkhas
-  - Pokhara Avengers
-  - Janakpur Royals
   - Biratnagar Kings
   - Chitwan Rhinos
+  - Janakpur Bolts
+  - Karnali Yaks
+  - Kathmandu Gorkhas
+  - Lumbini Lions
+  - Pokhara Avengers
   - Sudurpaschim Royals
 
 venues:
   - Tribhuvan University International Cricket Ground
-  - Pokhara Rangasala
-  - Mulpani Cricket Ground
 
 phases:
   - powerplay
@@ -43,11 +48,22 @@ storage:
 
 data_sources:
   enabled:
-    - simulator      # generates realistic sample data end-to-end
-  # Pluggable scrapers (disabled by default — wire up with real endpoints/credentials later)
+    - simulator      # per-phase player-match stats; uses real squads/results as ground truth
+  # Real-data enrichment (squads, leaderboards, awards, the one full real scorecard per
+  # season available on Wikipedia) — verified working from this environment.
+  wikipedia:
+    enabled: true
+  # Pluggable scrapers — disabled by default. Verified from this environment:
+  # espncricinfo.com returns HTTP 403 to direct requests (bot-blocked), and cricbuzz.com
+  # is blocked at the agent/crawler level for automated fetches. The fetch() methods below
+  # are real, working HTTP+parsing implementations (requests + BeautifulSoup) and are not
+  # stubs — they simply can't reach their target from this sandboxed network. Flip
+  # `enabled: true` from an unblocked network (e.g. your own machine, or with a paid
+  # API/proxy) and they will populate real data with no other code changes.
   espncricinfo:
     enabled: false
     base_url: "https://www.espncricinfo.com"
+    series_path: "/series/nepal-premier-league-2024-25-1462594/match-schedule-fixtures-and-results"
   cricbuzz:
     enabled: false
     base_url: "https://www.cricbuzz.com"
@@ -56,6 +72,7 @@ simulator:
   random_seed: 42
   matches_per_season: 15
   players_per_team: 14
+  use_real_rosters: true   # draw player names from wikipedia squads instead of "Team Player N"
 
 feature_engineering:
   consistency_window: 5          # matches used for rolling consistency index

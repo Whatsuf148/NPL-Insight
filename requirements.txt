@@ -4,6 +4,8 @@ PyYAML>=6.0
 streamlit>=1.30
 plotly>=5.18
 pytest>=7.4
+requests>=2.31
+beautifulsoup4>=4.12
 # Note: win-probability model uses src/logistic_regression.py (pure numpy),
 # not scikit-learn — scikit-learn/scipy require compiled extensions that
 # may be blocked by OS-level security policies (e.g. Windows Application

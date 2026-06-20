@@ -29,10 +29,16 @@ class SimulatorSource(DataSource):
         seed = sim_cfg.get("random_seed", 42)
 
         rng = np.random.default_rng(seed + season_id)
-        rosters = {
-            team: [f"{team.split()[0]} Player {i+1}" for i in range(players_per_team)]
-            for team in teams
-        }
+        real_rosters: dict[str, list[str]] = self.config.get("_real_rosters", {})
+        use_real = sim_cfg.get("use_real_rosters", True) and bool(real_rosters)
+
+        rosters = {}
+        for team in teams:
+            real_players = real_rosters.get(team, []) if use_real else []
+            synthetic_players = [f"{team.split()[0]} Player {i+1}" for i in range(players_per_team)]
+            # Pad with synthetic names if a team's real squad is smaller than
+            # players_per_team, so every team always has a full pool to draw from.
+            rosters[team] = list(real_players) + synthetic_players[len(real_players):]
 
         records = []
         match_id_counter = 1

@@ -29,7 +29,13 @@ class SimulatorSource(DataSource):
         seed = sim_cfg.get("random_seed", 42)
 
         rng = np.random.default_rng(seed + season_id)
-        real_rosters: dict[str, list[str]] = self.config.get("_real_rosters", {})
+        # Prefer season-specific rosters (built from this season's own match
+        # evidence, so a mid-season transfer like Marchant de Lange moving
+        # from Chitwan Rhinos in S1 to Biratnagar Kings in S2 is reflected
+        # correctly) over the flat, season-agnostic union — see
+        # data_collection._build_season_rosters for how these differ.
+        real_rosters_by_season: dict[int, dict[str, list[str]]] = self.config.get("_real_rosters_by_season", {})
+        real_rosters: dict[str, list[str]] = real_rosters_by_season.get(season_id) or self.config.get("_real_rosters", {})
         real_captains: dict[str, str] = self.config.get("_real_captains", {})
         use_real = sim_cfg.get("use_real_rosters", True) and bool(real_rosters)
 

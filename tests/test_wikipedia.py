@@ -114,3 +114,34 @@ def test_fetch_captains_resolves_every_team_to_configs_canonical_spelling(source
     assert set(captains.keys()).issubset(set(config["teams"]))
     assert "Kathmandu Gorkhas" in captains
     assert captains["Kathmandu Gorkhas"] == "Karan KC"
+
+
+def test_fetch_match_results_covers_every_real_match(source):
+    """Season has 28 league-stage + 4 playoff matches = 32 total."""
+    results = source.fetch_match_results(season_id=1)
+    assert len(results) == 32
+    assert results["winner"].notna().all()
+    assert (results["team1"] != results["team2"]).all()
+
+
+def test_fetch_match_results_winner_resolves_to_canonical_team_spelling(source, config):
+    """Regression guard: the winner-extraction regex captures a team's full
+    name as spelled in *that match's own* result sentence, which can use a
+    different spelling than team1/team2 in the same row (e.g. "Kathmandu
+    Gurkhas won by 3 wickets" vs config's "Kathmandu Gorkhas"). Every winner
+    must resolve to config's canonical spelling, not the raw scraped text."""
+    results = source.fetch_match_results(season_id=1)
+    assert set(results["winner"].dropna()).issubset(set(config["teams"]))
+
+
+def test_fetch_match_results_detects_real_marchant_de_lange_transfer(source):
+    """Regression guard for the bug the user reported: Season 1's only
+    parseable squad table lists Marchant de Lange under Chitwan Rhinos, but
+    he really played for Biratnagar Kings in Season 2 — a mid-season
+    transfer a single static squad snapshot can't capture. Direct match
+    evidence (top-bowler mentions) must show him under Biratnagar Kings in
+    Season 2."""
+    results_s2 = source.fetch_match_results(season_id=2)
+    bk_bowler_col = "Biratnagar Kings_top_bowler"
+    assert bk_bowler_col in results_s2.columns
+    assert (results_s2[bk_bowler_col] == "Marchant de Lange").any()

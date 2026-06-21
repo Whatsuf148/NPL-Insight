@@ -66,7 +66,7 @@ def bowling_metrics_by_phase(df: pd.DataFrame) -> pd.DataFrame:
     g["wicket_probability"] = np.where(
         g["balls_bowled"] > 0, round(g["wickets"] / g["balls_bowled"], 4), 0.0
     )
-    return g[["season", "player", "team", "phase", "economy_by_phase", "wicket_probability"]]
+    return g[["season", "player", "team", "phase", "overs", "economy_by_phase", "wicket_probability"]]
 
 
 def dot_ball_percentage(df: pd.DataFrame) -> pd.DataFrame:
@@ -85,8 +85,15 @@ def fielding_metrics(df: pd.DataFrame) -> pd.DataFrame:
     )
     total_chances = g["catches_taken"] + g["catches_dropped"]
     g["catch_efficiency"] = np.where(total_chances > 0, round(g["catches_taken"] / total_chances, 3), np.nan)
+
+    # Denominator must include fielding_errors itself — it was previously just
+    # catches_taken + catches_dropped, which let fielding_error_rate exceed 1.0
+    # whenever a player had more recorded errors than catch chances (errors here
+    # cover misfields/overthrows, not just drops, so they aren't bounded by catch
+    # chances alone). A "rate" that can read above 100% is meaningless.
+    total_fielding_events = total_chances + g["fielding_errors"]
     g["fielding_error_rate"] = np.where(
-        total_chances > 0, round(g["fielding_errors"] / total_chances.replace(0, np.nan), 3), 0.0
+        total_fielding_events > 0, round(g["fielding_errors"] / total_fielding_events.replace(0, np.nan), 3), 0.0
     )
     average_runs_per_drop = 18  # avg runs a dropped/missed chance costs in T20 cricket
     g["runs_lost_to_errors"] = (g["catches_dropped"] + g["stumping_missed"]) * average_runs_per_drop
@@ -130,12 +137,18 @@ def clutch_performance_index(df: pd.DataFrame, config: dict | None = None) -> pd
 
 
 def pressure_performance_score(df: pd.DataFrame, config: dict | None = None) -> pd.DataFrame:
-    """Performance in matches the player's team ultimately lost (proxy for pressure situations)."""
+    """Performance in matches the player's team ultimately lost (proxy for pressure situations).
+    Qualifies on a minimum balls-faced threshold for the same reason
+    clutch_performance_index does — without it, a player who faced 1 ball
+    for 4 runs in a single lost match would register a 400+ "pressure
+    score", a statistically meaningless headline number."""
     config = config or load_config()
+    min_balls = config["feature_engineering"]["pressure_min_balls"]
     pressure_rows = df[df["match_result"] == "Loss"]
     g = pressure_rows.groupby(["season", "player", "team"], as_index=False).agg(
         runs=("runs", "sum"), balls=("balls", "sum"), wickets=("wickets", "sum")
     )
+    g = g[g["balls"] >= min_balls]
     g["pressure_performance_score"] = np.where(
         g["balls"] > 0, round((g["runs"] / g["balls"] * 100) + g["wickets"] * 10, 2), 0.0
     )

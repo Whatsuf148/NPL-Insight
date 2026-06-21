@@ -23,6 +23,10 @@ REQUIRED_COLUMNS = ["match_id", "season", "team", "opponent", "player", "venue",
 NUMERIC_COLUMNS = [
     "runs", "balls", "strike_rate", "wickets", "overs", "economy",
     "catches_taken", "catches_dropped", "stumping_missed", "fielding_errors",
+    # Real ball-by-ball-only columns (Cricsheet) — backfilled to 0 for
+    # sources that don't produce them (e.g. the simulator fallback), so
+    # downstream code can always rely on these columns existing.
+    "fours", "sixes", "dismissals", "maidens",
 ]
 CATEGORICAL_COLUMNS = ["team", "opponent", "player", "venue", "phase", "match_result"]
 
@@ -37,8 +41,9 @@ def clean(raw: pd.DataFrame, config: dict | None = None) -> pd.DataFrame:
         df = df[~missing_required]
 
     for col in NUMERIC_COLUMNS:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        if col not in df.columns:
+            df[col] = 0
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
     for col in CATEGORICAL_COLUMNS:
         if col in df.columns:

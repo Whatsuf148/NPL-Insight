@@ -48,11 +48,27 @@ storage:
 
 data_sources:
   enabled:
-    - simulator      # per-phase player-match stats; uses real squads/results as ground truth
+    - cricsheet      # real ball-by-ball data for every match — primary, most-accurate source
+  # Cricsheet (https://cricsheet.org) — real ball-by-ball JSON for all 64 NPL matches across
+  # both seasons. Verified working from this environment (HTTP 200, downloaded and parsed).
+  # Every batting/bowling number in the master dataset is a real delivery when this is enabled.
+  # Does NOT include dropped catches/missed stumpings/misfields — no public source records
+  # fielding mistakes for NPL, so those three columns are always a real "no data" 0, not an
+  # estimate. See src/data_sources/cricsheet.py for the full real/simulated breakdown.
+  cricsheet:
+    enabled: true
   # Real-data enrichment (squads, leaderboards, awards, the one full real scorecard per
-  # season available on Wikipedia) — verified working from this environment.
+  # season available on Wikipedia) — verified working from this environment. Player names
+  # use full names ("Sandeep Lamichhane"), while cricsheet uses cricket-scorecard abbreviated
+  # names ("S Lamichhane") — the two sources aren't name-joined; Fun Facts (Wikipedia) and
+  # Player Stats Explorer (cricsheet) may reference the same person under different spellings.
   wikipedia:
     enabled: true
+  # Statistical fallback — only used if cricsheet is disabled/unreachable. Real player names
+  # (drawn from Wikipedia squads) but simulated per-match performances; kept for offline/
+  # degraded-network use, not the primary source. See "Player Participation Realism" in README.
+  simulator:
+    enabled: false
   # Pluggable scrapers — disabled by default. Verified from this environment:
   # espncricinfo.com returns HTTP 403 to direct requests (bot-blocked), and cricbuzz.com
   # is blocked at the agent/crawler level for automated fetches. The fetch() methods below
@@ -78,6 +94,9 @@ feature_engineering:
   consistency_window: 5          # matches used for rolling consistency index
   pressure_chase_margin: 15       # runs target margin considered "pressure" chase
   clutch_min_balls: 12
+  pressure_min_balls: 12           # minimum balls faced in "lost matches" before pressure score qualifies
+  min_balls_for_rate_insights: 10   # minimum balls faced before a strike rate can headline an insight
+  min_overs_for_economy_insights: 2 # minimum overs bowled before an economy can headline an insight
 
 analytics:
   win_probability_model: "models/win_probability_model.pkl"

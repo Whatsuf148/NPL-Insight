@@ -4,5 +4,6 @@ __pycache__/
 data/raw/*.csv
 data/processed/*.csv
 data/processed/*.db
+data/external/
 models/*.pkl
 .streamlit/

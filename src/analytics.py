@@ -102,8 +102,12 @@ def player_stats_table(master_df: pd.DataFrame, season: int | None = None) -> pd
         matches=("match_id", "nunique"),
         runs=("runs", "sum"),
         balls_faced=("balls", "sum"),
+        fours=("fours", "sum"),
+        sixes=("sixes", "sum"),
+        dismissals=("dismissals", "sum"),
         wickets=("wickets", "sum"),
         overs_bowled=("overs", "sum"),
+        maidens=("maidens", "sum"),
         catches_taken=("catches_taken", "sum"),
         catches_dropped=("catches_dropped", "sum"),
         stumping_missed=("stumping_missed", "sum"),
@@ -111,10 +115,29 @@ def player_stats_table(master_df: pd.DataFrame, season: int | None = None) -> pd
     import numpy as np
 
     table["strike_rate"] = (table["runs"] / table["balls_faced"].replace(0, np.nan) * 100).round(2).fillna(0.0)
+    # Career-style batting average: runs per dismissal, computed once across
+    # the whole season (every phase combined) — not per-phase, since an
+    # "average" is meaningless split into 20-ball windows. A player who was
+    # never dismissed (true not-out across the whole sample) has an
+    # undefined/infinite average by cricket convention; we report their raw
+    # runs total instead of dividing by zero.
+    table["batting_average"] = np.where(
+        table["dismissals"] > 0, (table["runs"] / table["dismissals"]).round(2), table["runs"].astype(float)
+    )
+    table["not_outs"] = (table["matches"] - table["dismissals"]).clip(lower=0)
+    table["boundary_pct"] = np.where(
+        table["balls_faced"] > 0,
+        ((table["fours"] + table["sixes"]) / table["balls_faced"] * 100).round(2),
+        0.0,
+    )
+
     runs_conceded = runs_conceded.reset_index(name="runs_conceded")
     table = table.merge(runs_conceded, on=["season", "player", "team"], how="left")
     table["runs_conceded"] = table["runs_conceded"].fillna(0)
     table["economy"] = (table["runs_conceded"] / table["overs_bowled"].replace(0, np.nan)).round(2).fillna(0.0)
+    table["bowling_average"] = np.where(
+        table["wickets"] > 0, (table["runs_conceded"] / table["wickets"]).round(2), np.nan
+    )
 
     team_matches = df.groupby(["season", "team"])["match_id"].nunique().rename("team_matches")
     table = table.merge(team_matches, on=["season", "team"], how="left")
@@ -280,6 +303,48 @@ def all_time_leaders(master_df: pd.DataFrame, top_n: int = 10) -> dict[str, pd.D
     return {"runs": runs, "wickets": wickets, "catches": catches}
 
 
+def season_leaderboards(
+    master_df: pd.DataFrame, season: int | None = None, top_n: int = 10,
+    min_balls_for_average: int = 30, min_overs_for_bowling_average: float = 4.0,
+) -> dict[str, pd.DataFrame]:
+    """Season-scoped leaderboards beyond plain run/wicket totals: most
+    sixes, most fours, best batting average, best bowling average — each
+    qualified on a minimum sample so a single big over doesn't top the list.
+    Built on top of `player_stats_table`, which already computes every one
+    of these from real ball-by-ball figures when Cricsheet is the active source.
+    """
+    stats = player_stats_table(master_df, season=season)
+
+    most_sixes = stats.sort_values("sixes", ascending=False).head(top_n)[
+        ["season", "player", "team", "sixes", "fours", "matches"]
+    ].reset_index(drop=True)
+    most_fours = stats.sort_values("fours", ascending=False).head(top_n)[
+        ["season", "player", "team", "fours", "sixes", "matches"]
+    ].reset_index(drop=True)
+
+    qualified_batters = stats[stats["balls_faced"] >= min_balls_for_average]
+    best_batting_average = qualified_batters.sort_values("batting_average", ascending=False).head(top_n)[
+        ["season", "player", "team", "batting_average", "runs", "dismissals", "not_outs", "balls_faced"]
+    ].reset_index(drop=True)
+
+    qualified_bowlers = stats[stats["overs_bowled"] >= min_overs_for_bowling_average]
+    best_bowling_average = qualified_bowlers.dropna(subset=["bowling_average"]).sort_values(
+        "bowling_average", ascending=True
+    ).head(top_n)[["season", "player", "team", "bowling_average", "wickets", "overs_bowled", "economy"]].reset_index(drop=True)
+
+    most_maidens = stats.sort_values("maidens", ascending=False).head(top_n)[
+        ["season", "player", "team", "maidens", "overs_bowled", "economy"]
+    ].reset_index(drop=True)
+
+    return {
+        "most_sixes": most_sixes,
+        "most_fours": most_fours,
+        "best_batting_average": best_batting_average,
+        "best_bowling_average": best_bowling_average,
+        "most_maidens": most_maidens,
+    }
+
+
 def real_all_time_leaders(leaders_runs: pd.DataFrame, leaders_wickets: pd.DataFrame) -> dict[str, pd.DataFrame]:
     """Combines each season's REAL published top-5 leaderboard into one
     cross-season total. Caveat: this only sums what each season's article
@@ -332,6 +397,85 @@ def head_to_head_record(head_to_head: pd.DataFrame, team_a: str, team_b: str) ->
         | ((head_to_head["team_a"] == team_b) & (head_to_head["team_b"] == team_a))
     )
     return head_to_head[mask].reset_index(drop=True)
+
+
+def batting_order_win_rate(match_results: pd.DataFrame) -> dict[str, object]:
+    """Real win rate by batting order (first vs second), derived from
+    `real_match_results` (Wikipedia's own scorecard convention: the team
+    listed first in "Team A 150 v Team B 151" always batted first).
+
+    This is presented as "batting order", not "toss win probability" — real
+    toss-decision data is only published for the two season finals (one
+    sentence each, see analytics.fun_facts), nowhere near enough matches to
+    fit a meaningful toss-outcome model. Batting order is the closest thing
+    with full real coverage (32 matches/season): in T20, winning the toss
+    and choosing to bat/bowl is what *decides* batting order in the
+    overwhelming majority of matches, so this is a reasonable, honestly
+    labeled proxy rather than a literal toss statistic.
+    """
+    df = match_results.dropna(subset=["winner"]).copy()
+    total = len(df)
+    if total == 0:
+        return {"overall": {}, "by_team": pd.DataFrame()}
+
+    first_wins = int((df["winner"] == df["team1"]).sum())
+    second_wins = int((df["winner"] == df["team2"]).sum())
+    overall = {
+        "total_matches": total,
+        "batted_first_wins": first_wins,
+        "batted_first_win_pct": round(first_wins / total * 100, 1),
+        "batted_second_wins": second_wins,
+        "batted_second_win_pct": round(second_wins / total * 100, 1),
+    }
+
+    teams = sorted(set(df["team1"]) | set(df["team2"]))
+    rows = []
+    for team in teams:
+        first = df[df["team1"] == team]
+        second = df[df["team2"] == team]
+        first_w = int((first["winner"] == team).sum())
+        second_w = int((second["winner"] == team).sum())
+        rows.append({
+            "team": team,
+            "matches_batting_first": len(first),
+            "win_pct_batting_first": round(first_w / len(first) * 100, 1) if len(first) else None,
+            "matches_batting_second": len(second),
+            "win_pct_batting_second": round(second_w / len(second) * 100, 1) if len(second) else None,
+        })
+
+    return {"overall": overall, "by_team": pd.DataFrame(rows)}
+
+
+def toss_win_probability(toss_results: pd.DataFrame) -> dict[str, object]:
+    """Real toss-outcome win rate, from `real_toss_results`
+    (`CricsheetSource.fetch_toss_results`) — genuine toss winner/decision
+    and match outcome for every match, not the batting-order proxy
+    `batting_order_win_rate` used before real per-match toss data was
+    available. Also breaks out win rate by the toss winner's decision
+    (bat vs field), since that's the more specific real question."""
+    df = toss_results.dropna(subset=["toss_winner", "match_winner"]).copy()
+    total = len(df)
+    if total == 0:
+        return {"overall": {}, "by_decision": pd.DataFrame()}
+
+    toss_winner_won = int(df["toss_winner_won_match"].sum())
+    overall = {
+        "total_matches": total,
+        "toss_winner_won_match": toss_winner_won,
+        "toss_winner_win_pct": round(toss_winner_won / total * 100, 1),
+    }
+
+    rows = []
+    for decision in sorted(df["toss_decision"].dropna().unique()):
+        subset = df[df["toss_decision"] == decision]
+        wins = int(subset["toss_winner_won_match"].sum())
+        rows.append({
+            "decision": decision,
+            "matches": len(subset),
+            "toss_winner_win_pct": round(wins / len(subset) * 100, 1) if len(subset) else None,
+        })
+
+    return {"overall": overall, "by_decision": pd.DataFrame(rows)}
 
 
 def win_probability_features(master_df: pd.DataFrame) -> pd.DataFrame:

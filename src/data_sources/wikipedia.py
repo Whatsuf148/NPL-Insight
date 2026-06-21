@@ -201,6 +201,18 @@ class WikipediaSource(DataSource):
                 return df
         return pd.DataFrame(columns=["Award", "Prize", "Player", "Team", "season"])
 
+    def fetch_final_toss(self, season_id: int) -> str | None:
+        """The one real toss sentence Wikipedia publishes for the season —
+        only the final's scorecard includes a "Toss:" line; no other match
+        in either season's article has toss data at all. Not enough real
+        coverage to build a toss-outcome model from (see
+        analytics.batting_order_win_rate for the real-data proxy used
+        instead), but worth surfacing as a verified fact."""
+        soup = _get_soup(self._season_url(season_id))
+        text = soup.get_text()
+        match = re.search(r"Toss:\s*(.+?\.)", text)
+        return re.sub(r"\s+", " ", match.group(1)).strip() if match else None
+
     def fetch_standings(self, season_id: int) -> pd.DataFrame:
         """Real points table: position, played/won/lost, points, NRR."""
         known_teams = self.config["teams"]
@@ -277,6 +289,111 @@ class WikipediaSource(DataSource):
                     })
             return pd.DataFrame.from_records(records)
         return pd.DataFrame()
+
+    def fetch_match_results(self, season_id: int) -> pd.DataFrame:
+        """Real per-match results for every match of the season (league stage
+        + playoffs + final) — not just the one match `fetch()` covers.
+
+        Wikipedia's season articles embed a per-match info box for every
+        single match (team scores, overs, top batter/bowler per innings,
+        winner, margin, venue, Player of the Match), distinct from the
+        head-to-head grid (`fetch_head_to_head`, winner/margin only, one row
+        per pairing) and the one fully-detailed final scorecard (`fetch()`).
+        This is the richest real source on the page: ~4 real player-team
+        associations per match (32 matches/season), which is what makes it
+        possible to catch a real mid-season transfer (e.g. Marchant de Lange
+        moving from Chitwan Rhinos in Season 1 to Biratnagar Kings in Season
+        2) that a single static squad table can't reflect.
+        """
+        known_teams = self.config["teams"]
+        soup = _get_soup(self._season_url(season_id))
+        all_tables = soup.find_all("table")
+        none_class_tables = [t for t in all_tables if t.get("class") is None]
+
+        label_re = re.compile(r"^(Match \d+|Final|Qualifier \d+|Eliminator)")
+        score_re = re.compile(r"^(.*?)\s+([\d/]+)\s*\((\d+(?:\.\d+)?)\s*overs?\)$")
+        batter_re = re.compile(r"^(.*?)\s+(\d+)\s*\*?\s*\((\d+)\)\s*(.*)$")
+        bowler_re = re.compile(r"^(.*?)\s+(\d+/\d+)\s*\(([\d.]+)\s*overs?\)$")
+        winner_re = re.compile(r"^(.*?)\s+won by\s+(.*?)\s+Tribhuvan", re.IGNORECASE)
+        super_over_re = re.compile(r"Match tied \((.*?) won the Super Over", re.IGNORECASE)
+        potm_re = re.compile(r"Player of the match:\s*(.*?)\s*\((.*?)\)")
+
+        groups = []
+        i = 0
+        while i < len(none_class_tables):
+            header_text = none_class_tables[i].get_text("|", strip=True)
+            if label_re.match(header_text) and i + 2 < len(none_class_tables):
+                groups.append((header_text, none_class_tables[i + 1], none_class_tables[i + 2]))
+                i += 3
+            else:
+                i += 1
+
+        records = []
+        for label_text, score_table, result_table in groups:
+            label_parts = label_text.split("|")
+            match_label = label_parts[0]
+            date = label_parts[1] if len(label_parts) > 1 else ""
+
+            score_rows = score_table.find_all("tr")
+            if len(score_rows) < 1:
+                continue
+            score_cells = [c.get_text(" ", strip=True) for c in score_rows[0].find_all(["th", "td"])]
+            if len(score_cells) < 3:
+                continue
+            m1, m2 = score_re.match(score_cells[0]), score_re.match(score_cells[2])
+            if not (m1 and m2):
+                continue
+            team1 = _canonicalize_team(m1.group(1).strip(), known_teams)
+            team2 = _canonicalize_team(m2.group(1).strip(), known_teams)
+
+            performers = {}
+            if len(score_rows) > 1:
+                perf_cells = [c.get_text(" ", strip=True) for c in score_rows[1].find_all(["th", "td"])]
+                perf_cells = [c for c in perf_cells if c]
+                for cell, batting_team, bowling_team in zip(perf_cells, (team1, team2), (team2, team1)):
+                    bm = batter_re.match(cell)
+                    if not bm:
+                        continue
+                    batter, runs, _balls, rest = bm.groups()
+                    performers[f"{batting_team}_top_batter"] = batter.strip()
+                    performers[f"{batting_team}_top_batter_runs"] = int(runs)
+                    bowl_m = bowler_re.match(rest.strip())
+                    if bowl_m:
+                        bowler, figures, _overs = bowl_m.groups()
+                        performers[f"{bowling_team}_top_bowler"] = bowler.strip()
+                        performers[f"{bowling_team}_top_bowler_figures"] = figures
+
+            result_text = result_table.get_text(" ", strip=True)
+            wm = winner_re.search(result_text)
+            winner_raw, margin = (wm.groups() if wm else (None, None))
+            if winner_raw is None:
+                som = super_over_re.search(result_text)
+                if som:
+                    winner_raw, margin = som.group(1), "Super Over"
+            # winner_re captures the team's full name as spelled in this specific
+            # match's result sentence, which can use a different spelling variant
+            # than team1/team2 above (e.g. "Kathmandu Gurkhas" vs "Kathmandu
+            # Gorkhas") — canonicalize directly rather than assuming it matches
+            # team1/team2 by substring.
+            winner = _canonicalize_team(winner_raw, known_teams) if winner_raw else None
+            potm_match = potm_re.search(result_text)
+            player_of_match = potm_match.group(1) if potm_match else None
+            potm_team = _canonicalize_team(potm_match.group(2), known_teams) if potm_match else None
+
+            records.append({
+                "season": season_id,
+                "match_label": match_label,
+                "date": date,
+                "team1": team1, "team1_score": m1.group(2), "team1_overs": m1.group(3),
+                "team2": team2, "team2_score": m2.group(2), "team2_overs": m2.group(3),
+                "winner": winner,
+                "margin": margin,
+                "player_of_match": player_of_match,
+                "player_of_match_team": potm_team,
+                **performers,
+            })
+
+        return pd.DataFrame.from_records(records)
 
     def fetch(self, season_id: int) -> pd.DataFrame:
         """Satisfies the DataSource interface: returns the one real, full match

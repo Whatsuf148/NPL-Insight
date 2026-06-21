@@ -120,18 +120,31 @@ with sections[0]:
 with sections[1]:
     st.header("Batting Analysis")
     batting = apply_filters(features["batting_by_phase"])
+    min_balls_insight = config["feature_engineering"]["min_balls_for_rate_insights"]
     if batting.empty:
         st.warning("No batting data for the current filter selection.")
     else:
-        fig = px.bar(batting, x="player", y="strike_rate_by_phase", color="phase", barmode="group",
-                     title="Strike Rate by Phase")
+        qualified_batting = batting[batting["balls"] >= min_balls_insight]
+        st.caption(
+            f"Chart and insight below are qualified on at least {min_balls_insight} balls faced "
+            f"in that phase across the season — small samples (e.g. 1 ball faced) can otherwise "
+            f"produce statistically meaningless strike rates (a single boundary off one ball is a "
+            f"\"600 strike rate\") that would mislead as a headline insight."
+        )
+        chart_source = qualified_batting if not qualified_batting.empty else batting
+        fig = px.bar(chart_source, x="player", y="strike_rate_by_phase", color="phase", barmode="group",
+                     title="Strike Rate by Phase (qualified)")
         st.plotly_chart(fig, width='stretch')
 
-        top_sr = batting.loc[batting["strike_rate_by_phase"].idxmax()]
-        st.success(
-            f"Insight: {top_sr['player']} ({top_sr['team']}) posts the highest phase strike rate "
-            f"at {top_sr['strike_rate_by_phase']} during the {top_sr['phase']} phase."
-        )
+        if not qualified_batting.empty:
+            top_sr = qualified_batting.loc[qualified_batting["strike_rate_by_phase"].idxmax()]
+            st.success(
+                f"Insight: {top_sr['player']} ({top_sr['team']}) posts the highest phase strike rate "
+                f"at {top_sr['strike_rate_by_phase']} during the {top_sr['phase']} phase "
+                f"(on {int(top_sr['balls'])} balls faced)."
+            )
+        else:
+            st.info(f"No players meet the {min_balls_insight}-ball qualification threshold for this selection.")
 
         consistency = apply_filters(features["consistency_index"])
         fig2 = px.bar(consistency.sort_values("consistency_index", ascending=False).head(15),
@@ -159,10 +172,18 @@ with sections[1]:
 with sections[2]:
     st.header("Bowling Analysis")
     bowling = apply_filters(features["bowling_by_phase"])
+    min_overs_insight = config["feature_engineering"]["min_overs_for_economy_insights"]
     if bowling.empty:
         st.warning("No bowling data for the current filter selection.")
     else:
-        fig = px.box(bowling, x="phase", y="economy_by_phase", color="phase", title="Economy vs Phase")
+        qualified_bowling = bowling[bowling["overs"] >= min_overs_insight]
+        st.caption(
+            f"Chart and insight below are qualified on at least {min_overs_insight} overs bowled in "
+            f"that phase across the season — a bowler who bowled 1 ball for 0 runs would otherwise "
+            f"register a \"0.00 economy\" that looks impressive but means nothing."
+        )
+        chart_source = qualified_bowling if not qualified_bowling.empty else bowling
+        fig = px.box(chart_source, x="phase", y="economy_by_phase", color="phase", title="Economy vs Phase (qualified)")
         st.plotly_chart(fig, width='stretch')
 
         wicket_dist = bowling.groupby("player", as_index=False)["wicket_probability"].mean()
@@ -170,12 +191,14 @@ with sections[2]:
                       x="player", y="wicket_probability", title="Wicket Probability (Top 15)")
         st.plotly_chart(fig2, width='stretch')
 
-        cheapest = bowling.loc[bowling["economy_by_phase"].idxmin()] if bowling["economy_by_phase"].gt(0).any() else None
-        if cheapest is not None:
+        if not qualified_bowling.empty:
+            cheapest = qualified_bowling.loc[qualified_bowling["economy_by_phase"].idxmin()]
             st.success(
                 f"Insight: {cheapest['player']} is the most economical bowler in the {cheapest['phase']} "
-                f"phase, conceding at {cheapest['economy_by_phase']} runs/over."
+                f"phase, conceding at {cheapest['economy_by_phase']} runs/over (on {cheapest['overs']} overs)."
             )
+        else:
+            st.info(f"No bowlers meet the {min_overs_insight}-over qualification threshold for this selection.")
 
         st.subheader("Highest Wicket-Taker Against Each Team")
         matchups = analytics.top_wicket_taker_per_opponent(filtered_master)
@@ -230,10 +253,10 @@ with sections[4]:
 
         st.subheader("Player Stats Explorer")
         st.caption(
-            "Every player's full batting, bowling, and fielding line for the current filter selection. "
-            "`matches_played_pct` is how often this player appears relative to their team's matches that "
-            "season — useful for spotting whether a name is a regular starter or a bench player in the "
-            "simulated data."
+            "Every player's full batting, bowling, and fielding line for the current filter selection — "
+            "batting/bowling average and strike rate are computed once across the whole season (every "
+            "phase combined), not per-phase. `matches_played_pct` is how often this player appears "
+            "relative to their team's matches that season."
         )
         stats_table = analytics.player_stats_table(filtered_master)
         search = st.text_input("Search player name", value="", key="player_search")
@@ -242,7 +265,8 @@ with sections[4]:
         st.dataframe(
             stats_table[[
                 "season", "player", "team", "matches", "matches_played_pct", "runs", "balls_faced",
-                "strike_rate", "wickets", "overs_bowled", "economy",
+                "strike_rate", "batting_average", "not_outs", "fours", "sixes", "boundary_pct",
+                "wickets", "overs_bowled", "economy", "bowling_average", "maidens",
                 "catches_taken", "catches_dropped", "stumping_missed",
             ]],
             width='stretch', height=400,
@@ -259,7 +283,8 @@ with sections[4]:
                 st.dataframe(
                     profile["stats_by_season"][[
                         "season", "team", "matches", "matches_played_pct", "runs", "strike_rate",
-                        "wickets", "economy", "catches_taken",
+                        "batting_average", "fours", "sixes", "wickets", "economy", "bowling_average",
+                        "catches_taken",
                     ]],
                     width='stretch', hide_index=True,
                 )
@@ -297,6 +322,27 @@ with sections[4]:
         with col3:
             st.caption("Most Catches Taken")
             st.dataframe(all_time["catches"], width='stretch', hide_index=True)
+
+        st.subheader("Season Leaderboards")
+        st.caption(
+            "Most sixes/fours, best batting average, best bowling average, and most maidens — "
+            "averages qualify on a minimum sample (30 balls faced / 4 overs bowled) so a single "
+            "big over or one not-out innings can't top the list."
+        )
+        leaderboards = analytics.season_leaderboards(filtered_master)
+        lcol1, lcol2 = st.columns(2)
+        with lcol1:
+            st.caption("Most Sixes")
+            st.dataframe(leaderboards["most_sixes"], width='stretch', hide_index=True)
+            st.caption("Best Batting Average (qualified)")
+            st.dataframe(leaderboards["best_batting_average"], width='stretch', hide_index=True)
+        with lcol2:
+            st.caption("Most Fours")
+            st.dataframe(leaderboards["most_fours"], width='stretch', hide_index=True)
+            st.caption("Best Bowling Average (qualified)")
+            st.dataframe(leaderboards["best_bowling_average"], width='stretch', hide_index=True)
+        st.caption("Most Maidens")
+        st.dataframe(leaderboards["most_maidens"], width='stretch', hide_index=True)
 
         st.subheader("Player vs Player")
         st.caption(
@@ -424,5 +470,49 @@ with sections[6]:
                 wins_b = (record["winner"] == team_b_choice).sum()
                 st.info(f"Head-to-head: {team_a_choice} {wins_a} — {wins_b} {team_b_choice}")
                 st.dataframe(record.drop(columns=["team_a", "team_b"]), width='stretch', hide_index=True)
+    except Exception:
+        pass
+
+    try:
+        toss_results = load_table("real_toss_results", config)
+        if not toss_results.empty:
+            st.subheader("Real Toss Win Probability (every match, both seasons)")
+            st.caption(
+                "Genuine toss winner, decision, and match outcome for all 64 real matches — sourced "
+                "from Cricsheet's ball-by-ball data (cricsheet.org), not an estimate."
+            )
+            toss_stats = analytics.toss_win_probability(toss_results)
+            overall = toss_stats["overall"]
+            if overall:
+                st.metric(
+                    "Win % for the toss winner",
+                    f"{overall['toss_winner_win_pct']}%",
+                    help=f"{overall['toss_winner_won_match']} of {overall['total_matches']} real matches",
+                )
+                st.dataframe(toss_stats["by_decision"], width='stretch', hide_index=True)
+    except Exception:
+        pass
+
+    try:
+        match_results = load_table("real_match_results", config)
+        if not match_results.empty:
+            st.subheader("Batting Order Win Rate (real, all matches)")
+            order_stats = analytics.batting_order_win_rate(match_results)
+            overall = order_stats["overall"]
+            if overall:
+                ocol1, ocol2 = st.columns(2)
+                with ocol1:
+                    st.metric(
+                        "Win % batting first",
+                        f"{overall['batted_first_win_pct']}%",
+                        help=f"{overall['batted_first_wins']} of {overall['total_matches']} real matches",
+                    )
+                with ocol2:
+                    st.metric(
+                        "Win % batting second",
+                        f"{overall['batted_second_win_pct']}%",
+                        help=f"{overall['batted_second_wins']} of {overall['total_matches']} real matches",
+                    )
+                st.dataframe(order_stats["by_team"], width='stretch', hide_index=True)
     except Exception:
         pass

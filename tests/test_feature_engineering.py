@@ -1,11 +1,14 @@
 import numpy as np
 
+import pandas as pd
+
 from src.data_cleaning import clean
 from src.feature_engineering import (
     batting_metrics_by_phase,
     bowling_metrics_by_phase,
     build_feature_set,
     fielding_metrics,
+    pressure_performance_score,
 )
 
 
@@ -56,3 +59,27 @@ def test_player_impact_score_bounded_zero_to_hundred(sample_master_df, config):
     tables = build_feature_set(cleaned, config)
     scores = tables["player_impact_score"]["player_impact_score"]
     assert scores.between(-100, 100).all()
+
+
+def test_fielding_error_rate_never_exceeds_one(config):
+    """Regression guard: fielding_error_rate's denominator was previously
+    just catches_taken + catches_dropped, which doesn't bound
+    fielding_errors (a separate counter covering misfields/overthrows, not
+    just drops) — a player with more errors than catch chances produced a
+    'rate' above 1.0, which is meaningless for something framed as a rate."""
+    df = pd.DataFrame([
+        {
+            "season": 1, "player": "P", "team": "A", "match_id": "M1",
+            "catches_taken": 0, "catches_dropped": 1, "stumping_missed": 0, "fielding_errors": 5,
+        },
+    ])
+    result = fielding_metrics(df)
+    assert (result["fielding_error_rate"] <= 1.0).all()
+    assert (result["fielding_error_rate"] >= 0.0).all()
+
+
+def test_pressure_performance_score_excludes_players_under_min_balls(sample_master_df, config):
+    cleaned = clean(sample_master_df, config)
+    tiny_config = {**config, "feature_engineering": {**config["feature_engineering"], "pressure_min_balls": 1000}}
+    result = pressure_performance_score(cleaned, tiny_config)
+    assert result.empty

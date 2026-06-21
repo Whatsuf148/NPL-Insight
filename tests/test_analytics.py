@@ -59,6 +59,48 @@ def test_player_stats_table_strike_rate_matches_runs_over_balls(sample_master_df
     assert (nonzero["strike_rate"] == expected).all()
 
 
+def test_player_stats_table_batting_average_is_runs_per_dismissal():
+    import pandas as pd
+
+    df = pd.DataFrame([
+        {"season": 1, "player": "P", "team": "A", "match_id": "M1", "runs": 50, "balls": 30,
+         "dismissals": 1, "fours": 4, "sixes": 1, "wickets": 0, "overs": 0, "economy": 0,
+         "maidens": 0, "catches_taken": 0, "catches_dropped": 0, "stumping_missed": 0},
+        {"season": 1, "player": "P", "team": "A", "match_id": "M2", "runs": 30, "balls": 20,
+         "dismissals": 1, "fours": 2, "sixes": 0, "wickets": 0, "overs": 0, "economy": 0,
+         "maidens": 0, "catches_taken": 0, "catches_dropped": 0, "stumping_missed": 0},
+    ])
+    table = analytics.player_stats_table(df)
+    row = table.iloc[0]
+    assert row["batting_average"] == 40.0  # (50+30) runs / 2 dismissals
+
+
+def test_player_stats_table_batting_average_uses_raw_runs_when_never_dismissed():
+    import pandas as pd
+
+    df = pd.DataFrame([
+        {"season": 1, "player": "P", "team": "A", "match_id": "M1", "runs": 50, "balls": 30,
+         "dismissals": 0, "fours": 4, "sixes": 1, "wickets": 0, "overs": 0, "economy": 0,
+         "maidens": 0, "catches_taken": 0, "catches_dropped": 0, "stumping_missed": 0},
+    ])
+    table = analytics.player_stats_table(df)
+    assert table.iloc[0]["batting_average"] == 50.0
+    assert table.iloc[0]["not_outs"] == 1
+
+
+def test_player_stats_table_bowling_average_is_runs_conceded_per_wicket():
+    import pandas as pd
+
+    df = pd.DataFrame([
+        {"season": 1, "player": "P", "team": "A", "match_id": "M1", "runs": 0, "balls": 0,
+         "dismissals": 0, "fours": 0, "sixes": 0, "wickets": 2, "overs": 4.0, "economy": 6.0,
+         "maidens": 0, "catches_taken": 0, "catches_dropped": 0, "stumping_missed": 0},
+    ])
+    table = analytics.player_stats_table(df)
+    # economy 6.0 over 4 overs = 24 runs conceded; 24 / 2 wickets = 12.0
+    assert table.iloc[0]["bowling_average"] == 12.0
+
+
 def test_player_stats_table_matches_played_pct_is_100_when_player_in_every_team_match(sample_master_df, config):
     cleaned = clean(sample_master_df, config)
     table = analytics.player_stats_table(cleaned)
@@ -114,6 +156,38 @@ def test_player_profile_impact_rank_is_consistent_with_score_ordering(sample_mas
         ).reset_index(drop=True)
         expected_rank = season_scores[season_scores["player"] == player].index[0] + 1
         assert rank_row["impact_rank"] == expected_rank
+
+
+def test_season_leaderboards_qualify_batting_average_on_minimum_balls():
+    import pandas as pd
+
+    df = pd.DataFrame([
+        {"season": 1, "player": "TinySample", "team": "A", "match_id": "M1", "runs": 20, "balls": 5,
+         "dismissals": 1, "fours": 0, "sixes": 0, "wickets": 0, "overs": 0, "economy": 0,
+         "maidens": 0, "catches_taken": 0, "catches_dropped": 0, "stumping_missed": 0},
+        {"season": 1, "player": "BigSample", "team": "A", "match_id": "M2", "runs": 50, "balls": 40,
+         "dismissals": 1, "fours": 0, "sixes": 0, "wickets": 0, "overs": 0, "economy": 0,
+         "maidens": 0, "catches_taken": 0, "catches_dropped": 0, "stumping_missed": 0},
+    ])
+    result = analytics.season_leaderboards(df, min_balls_for_average=30)
+    assert "TinySample" not in result["best_batting_average"]["player"].values
+    assert "BigSample" in result["best_batting_average"]["player"].values
+
+
+def test_season_leaderboards_qualify_bowling_average_on_minimum_overs():
+    import pandas as pd
+
+    df = pd.DataFrame([
+        {"season": 1, "player": "TinyBowler", "team": "A", "match_id": "M1", "runs": 0, "balls": 0,
+         "dismissals": 0, "fours": 0, "sixes": 0, "wickets": 1, "overs": 1.0, "economy": 5.0,
+         "maidens": 0, "catches_taken": 0, "catches_dropped": 0, "stumping_missed": 0},
+        {"season": 1, "player": "BigBowler", "team": "A", "match_id": "M2", "runs": 0, "balls": 0,
+         "dismissals": 0, "fours": 0, "sixes": 0, "wickets": 2, "overs": 8.0, "economy": 6.0,
+         "maidens": 0, "catches_taken": 0, "catches_dropped": 0, "stumping_missed": 0},
+    ])
+    result = analytics.season_leaderboards(df, min_overs_for_bowling_average=4.0)
+    assert "TinyBowler" not in result["best_bowling_average"]["player"].values
+    assert "BigBowler" in result["best_bowling_average"]["player"].values
 
 
 def test_top_wicket_taker_per_opponent_has_one_row_per_season_and_opponent(sample_master_df, config):
@@ -204,3 +278,80 @@ def test_fun_facts_returns_fallback_message_when_no_real_tables_exist(monkeypatc
     facts = analytics.fun_facts(config)
     assert len(facts) == 1
     assert "enable data_sources.wikipedia" in facts[0]
+
+
+def test_batting_order_win_rate_overall_percentages_sum_correctly():
+    import pandas as pd
+
+    match_results = pd.DataFrame([
+        {"team1": "A", "team2": "B", "winner": "A"},
+        {"team1": "A", "team2": "B", "winner": "B"},
+        {"team1": "B", "team2": "A", "winner": "B"},
+        {"team1": "B", "team2": "A", "winner": "B"},
+    ])
+    result = analytics.batting_order_win_rate(match_results)
+    overall = result["overall"]
+    assert overall["total_matches"] == 4
+    assert overall["batted_first_wins"] + overall["batted_second_wins"] == 4
+    assert overall["batted_first_win_pct"] + overall["batted_second_win_pct"] == 100.0
+
+
+def test_batting_order_win_rate_per_team_breakdown():
+    import pandas as pd
+
+    match_results = pd.DataFrame([
+        {"team1": "A", "team2": "B", "winner": "A"},  # A bats first, wins
+        {"team1": "B", "team2": "A", "winner": "A"},  # A bats second, wins
+    ])
+    result = analytics.batting_order_win_rate(match_results)
+    by_team = result["by_team"].set_index("team")
+    assert by_team.loc["A", "win_pct_batting_first"] == 100.0
+    assert by_team.loc["A", "win_pct_batting_second"] == 100.0
+
+
+def test_batting_order_win_rate_handles_empty_input():
+    import pandas as pd
+
+    result = analytics.batting_order_win_rate(pd.DataFrame(columns=["team1", "team2", "winner"]))
+    assert result["overall"] == {}
+    assert result["by_team"].empty
+
+
+def test_toss_win_probability_overall_pct_matches_raw_counts():
+    import pandas as pd
+
+    toss_results = pd.DataFrame([
+        {"toss_winner": "A", "match_winner": "A", "toss_decision": "bat", "toss_winner_won_match": True},
+        {"toss_winner": "A", "match_winner": "B", "toss_decision": "bat", "toss_winner_won_match": False},
+        {"toss_winner": "B", "match_winner": "B", "toss_decision": "field", "toss_winner_won_match": True},
+        {"toss_winner": "B", "match_winner": "B", "toss_decision": "field", "toss_winner_won_match": True},
+    ])
+    result = analytics.toss_win_probability(toss_results)
+    assert result["overall"]["total_matches"] == 4
+    assert result["overall"]["toss_winner_won_match"] == 3
+    assert result["overall"]["toss_winner_win_pct"] == 75.0
+
+
+def test_toss_win_probability_breaks_down_by_decision():
+    import pandas as pd
+
+    toss_results = pd.DataFrame([
+        {"toss_winner": "A", "match_winner": "A", "toss_decision": "bat", "toss_winner_won_match": True},
+        {"toss_winner": "A", "match_winner": "B", "toss_decision": "bat", "toss_winner_won_match": False},
+        {"toss_winner": "B", "match_winner": "B", "toss_decision": "field", "toss_winner_won_match": True},
+    ])
+    result = analytics.toss_win_probability(toss_results)
+    by_decision = result["by_decision"].set_index("decision")
+    assert by_decision.loc["bat", "matches"] == 2
+    assert by_decision.loc["bat", "toss_winner_win_pct"] == 50.0
+    assert by_decision.loc["field", "matches"] == 1
+
+
+def test_toss_win_probability_handles_empty_input():
+    import pandas as pd
+
+    result = analytics.toss_win_probability(
+        pd.DataFrame(columns=["toss_winner", "match_winner", "toss_decision", "toss_winner_won_match"])
+    )
+    assert result["overall"] == {}
+    assert result["by_decision"].empty
